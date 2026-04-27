@@ -1,0 +1,306 @@
+:root {
+  --ov-radius: 10px;
+  --ov-pad-y: 8px;
+  --ov-pad-x: 12px;
+  --ov-blur: 14px;
+  --ov-inset: 16px;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  font-family: var(--vscode-font-family);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  background:
+    linear-gradient(45deg, rgba(127,127,127,0.08) 25%, transparent 25%, transparent 75%, rgba(127,127,127,0.08) 75%) 0 0 / 20px 20px,
+    linear-gradient(45deg, rgba(127,127,127,0.08) 25%, transparent 25%, transparent 75%, rgba(127,127,127,0.08) 75%) 10px 10px / 20px 20px;
+}
+#stage.dragging { cursor: grabbing; }
+
+#img {
+  max-width: 100%;
+  max-height: 100%;
+  transform-origin: center;
+  image-rendering: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+  transition: transform 0.04s linear;
+  will-change: transform;
+}
+
+.overlay {
+  position: fixed;
+  padding: 10px 14px;
+  border-radius: var(--ov-radius);
+  max-width: 44vw;
+  min-width: 0;
+  pointer-events: none;
+  backdrop-filter: blur(var(--ov-blur)) saturate(1.3);
+  -webkit-backdrop-filter: blur(var(--ov-blur)) saturate(1.3);
+  background: rgba(22, 22, 24, 0.58);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 6px 22px rgba(0,0,0,0.32), 0 1px 0 rgba(255,255,255,0.05) inset;
+  color: #f2f2f3;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+  z-index: 10;
+  font-feature-settings: "tnum", "ss01";
+  line-height: 1.4;
+}
+
+.overlay.on-dark {
+  background: rgba(245, 245, 248, 0.11);
+  border-color: rgba(255,255,255,0.14);
+  color: #f6f6f7;
+}
+.overlay.on-light {
+  background: rgba(18, 18, 20, 0.62);
+  border-color: rgba(255,255,255,0.10);
+  color: #f7f7f7;
+}
+
+.corner.tl { top: var(--ov-inset); left: var(--ov-inset); text-align: left; }
+.corner.tr { top: var(--ov-inset); right: var(--ov-inset); text-align: right; }
+.corner.bl { bottom: var(--ov-inset); left: var(--ov-inset); text-align: left; }
+.corner.br { bottom: var(--ov-inset); right: var(--ov-inset); text-align: right; }
+
+.overlay .title {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.005em;
+  max-width: 38vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.overlay .meta {
+  font-size: 12px;
+  opacity: 0.94;
+}
+.overlay .meta.big {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.overlay .meta.dim {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+/* C: cursor near a corner → only that corner dims */
+body:not(.idle) .overlay.cursor-near {
+  opacity: 0.10;
+}
+
+/* A: idle → all overlays dim uniformly (beats cursor-near because body:not(.idle) no longer matches) */
+body.idle .overlay {
+  opacity: 0.08;
+  transform: scale(0.98);
+}
+
+.overlay.empty {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.9);
+}
+
+body.overlay-hidden .overlay {
+  opacity: 0;
+  transform: scale(0.96);
+  pointer-events: none;
+}
+
+body.expanded .corner.tl {
+  max-width: 56vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+.card-section > * + * { margin-top: 2px; }
+.card-section .title + .meta.big { margin-top: 4px; }
+
+.overlay a,
+.overlay a:visited {
+  color: inherit;
+  text-decoration: none;
+  pointer-events: auto;
+}
+.overlay a:not(.map-link) {
+  border-bottom: 1px dashed currentColor;
+  opacity: 0.85;
+}
+.overlay a:not(.map-link):hover {
+  opacity: 1;
+  border-bottom-style: solid;
+}
+
+/* Inline map thumbnail */
+.map-link {
+  display: block;
+  margin-top: 6px;
+  line-height: 0;
+}
+.map-view {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.35);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+a.map-link:hover .map-view {
+  border-color: rgba(255, 255, 255, 0.45);
+  transform: scale(1.01);
+}
+.map-tile {
+  position: absolute;
+  width: 256px;
+  height: 256px;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  max-width: none !important;
+  max-height: none !important;
+}
+.map-marker {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  background: #ff3b30;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.3) inset;
+  pointer-events: none;
+  z-index: 2;
+}
+.map-coord {
+  position: absolute;
+  left: 6px;
+  bottom: 4px;
+  font-size: 10px;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  font-feature-settings: "tnum";
+  letter-spacing: 0.01em;
+  z-index: 3;
+}
+.map-attribution {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  font-size: 8px;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* GPS card with inline map stays fully visible during idle /
+   cursor-near fade — otherwise the map defeats its own purpose. */
+body.idle .overlay:has(.has-map),
+body:not(.idle) .overlay.cursor-near:has(.has-map) {
+  opacity: 1;
+  transform: none;
+}
+
+/* Expanded EXIF panel (TL when body.expanded) is meant to be read.
+   Don't fade it on idle or cursor-near — the user is actively engaging
+   with it (overflow-y:auto, pointer-events:auto). */
+body.expanded .corner.tl,
+body.expanded .corner.tl.cursor-near {
+  opacity: 1;
+  transform: none;
+}
+
+/* BR zoom indicator — small status pill, not a full info card. */
+.corner.br {
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.corner.br .card-section > * + * { margin-top: 0; }
+.corner.br .zoom-pct {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.exif-section {
+  margin-top: 10px;
+}
+.exif-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.5;
+  margin-bottom: 2px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  padding-top: 6px;
+}
+.exif-section:first-of-type .exif-section-title {
+  border-top: none;
+  padding-top: 0;
+}
+
+.exif-table {
+  margin-top: 2px;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11px;
+}
+.exif-table td {
+  padding: 2px 8px 2px 0;
+  vertical-align: top;
+}
+.exif-table td:first-child {
+  opacity: 0.55;
+  white-space: nowrap;
+  padding-right: 14px;
+}
+.exif-table td:last-child {
+  word-break: break-word;
+}
+
+.hint {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: rgba(255,255,255,0.55);
+  background: rgba(0,0,0,0.42);
+  padding: 5px 12px;
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  transition: opacity 0.7s ease;
+  z-index: 20;
+  user-select: none;
+}
+.hint kbd {
+  background: rgba(255,255,255,0.14);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  margin: 0 1px;
+}
+.hint.fade { opacity: 0; }
