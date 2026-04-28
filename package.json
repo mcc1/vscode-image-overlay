@@ -3,13 +3,21 @@
   "displayName": "Image Overlay Preview",
   "description": "Preview images with EXIF and metadata shown as unobtrusive corner overlays — no sidebar, image stays center stage.",
   "version": "0.0.1",
-  "publisher": "local-dev",
+  "publisher": "mcc",
   "license": "MIT",
   "icon": "media/icon.png",
   "galleryBanner": {
     "color": "#1e1e22",
     "theme": "dark"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mcc1/vscode-image-overlay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mcc1/vscode-image-overlay/issues"
+  },
+  "homepage": "https://github.com/mcc1/vscode-image-overlay#readme",
   "keywords": [
     "image",
     "preview",
