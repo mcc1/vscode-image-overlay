@@ -6,9 +6,9 @@ interface ImageDocument extends vscode.CustomDocument {
 }
 
 // Formats we can render in the webview (must match package.json `customEditors.selector`).
-// .tif/.tiff are listed because we still want metadata, even though `<img>` may not render them.
+// TIFF rendering goes through utif in the webview; SVG is handled natively by `<img>`.
 const SUPPORTED_EXTS: ReadonlySet<string> = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.avif', '.tiff', '.tif', '.ico',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.avif', '.tiff', '.tif', '.ico', '.svg',
 ]);
 
 interface SiblingItem {

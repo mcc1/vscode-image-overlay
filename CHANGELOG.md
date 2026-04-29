@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.4 — More format support: SVG and TIFF rendering
+
+- **SVG** — added to the custom-editor selector. `<img>` already renders
+  SVG natively in the webview, so this is purely a registration change.
+- **TIFF rendering** — the editor used to register `.tif` / `.tiff` for
+  metadata only (Chromium can't decode TIFF in `<img>`). Now decoded
+  client-side via [`utif`](https://github.com/photopea/UTIF.js): fetch
+  bytes → decode IFD → toRGBA8 → canvas → PNG blob URL → `<img>.src`.
+  Everything downstream (corner luminance, EXIF parse, histogram) keeps
+  reading from the live `<img>`, so all existing features just work.
+- Decode failures now show "TIFF decode failed" in the TL card instead
+  of the generic "failed to load preview".
+- Bundle size: `viewer.js` grows from ~89 KB to ~175 KB minified (utif
+  + pako). Loaded eagerly — TIFF support is opt-in via filename only,
+  no lazy-loading complexity worth adding for ~86 KB.
+
 ## 0.1.3 — Performance: lighter EXIF parse, fully off-thread histogram
 
 - **EXIF parse no longer pre-fetches the whole file.** Hands the URL

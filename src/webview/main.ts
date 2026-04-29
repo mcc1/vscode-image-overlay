@@ -1,4 +1,7 @@
 import exifr from 'exifr';
+// TIFF decoder. utif is CJS but esbuild handles interop; the namespace
+// import gives us the decode / decodeImage / toRGBA8 functions we need.
+import * as UTIF from 'utif';
 
 interface SiblingItem {
   uri: string;
@@ -65,6 +68,15 @@ const state = {
   // image-load handlers compare against it and bail if superseded. Without
   // this, fast ←/→ presses can race and call onImageReady() out of order.
   loadGen: 0,
+  // For TIFF: <img> can't render TIFF natively, so we decode via utif into
+  // a PNG blob and point img at that. Track the URL so we can revoke it
+  // on the next swap (otherwise blob URLs accumulate in memory).
+  currentBlobUrl: null as string | null,
+  // True between "we know this is TIFF" and "the decoded blob has loaded
+  // into <img>". The error handler uses this (alongside isTiffName) to
+  // suppress the inline-load error event the browser fires on the original
+  // unsupported TIFF bytes.
+  tiffDecoding: false,
 };
 
 // Slideshow tuning bounds.
@@ -635,6 +647,106 @@ function applyTransform() {
   updateZoomDisplay();
 }
 
+// --- TIFF rendering ---
+// Chromium can't decode TIFF in <img>. We catch .tif/.tiff at load time and
+// route through utif: fetch bytes → decode IFD → toRGBA8 → canvas → PNG
+// blob URL → set img.src. Everything downstream (corners, EXIF, histogram)
+// keeps working because they all read from the live <img>.
+
+function isTiffName(name: string): boolean {
+  const ext = getExt(name).toLowerCase();
+  return ext === 'tif' || ext === 'tiff';
+}
+
+async function decodeTiffToBlobUrl(uri: string): Promise<string> {
+  const res = await fetch(uri);
+  if (!res.ok) throw new Error(`fetch ${res.status}`);
+  const buf = await res.arrayBuffer();
+  const ifds = UTIF.decode(buf);
+  if (!ifds.length) throw new Error('no IFDs in TIFF');
+  const ifd = ifds[0];
+  UTIF.decodeImage(buf, ifd);
+  const rgba = UTIF.toRGBA8(ifd);
+  const w = ifd.width;
+  const h = ifd.height;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const cctx = canvas.getContext('2d');
+  if (!cctx) throw new Error('no canvas 2d ctx');
+  // The ArrayBufferLike → ArrayBuffer cast is safe: rgba came out of utif
+  // which allocates a regular ArrayBuffer (not SharedArrayBuffer). Going
+  // through the buffer + byteOffset slot avoids copying the full RGBA
+  // array (~4 × W × H bytes — easily 100 MB on a 24 MP file).
+  const clamped = new Uint8ClampedArray(
+    rgba.buffer as ArrayBuffer,
+    rgba.byteOffset,
+    rgba.byteLength,
+  );
+  cctx.putImageData(new ImageData(clamped, w, h), 0, 0);
+  // toBlob is async; resolve with the object URL.
+  return new Promise<string>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) { reject(new Error('canvas.toBlob returned null')); return; }
+      resolve(URL.createObjectURL(blob));
+    }, 'image/png');
+  });
+}
+
+function freeCurrentBlobUrl(): void {
+  if (state.currentBlobUrl) {
+    URL.revokeObjectURL(state.currentBlobUrl);
+    state.currentBlobUrl = null;
+  }
+}
+
+// Unified image loader. For non-TIFF the URI goes straight to img.src; for
+// TIFF we run the decode pipeline first. Either way, onImageReady fires
+// once the image is actually ready in <img> (load event) — this single
+// entry point lets nav, fileUpdate and the initial load share the gen-token
+// race-handling.
+function loadImageInto(uri: string, name: string): void {
+  state.loadGen += 1;
+  const myGen = state.loadGen;
+
+  const onLoad = () => {
+    if (myGen !== state.loadGen) return;
+    state.tiffDecoding = false;
+    void onImageReady();
+  };
+  img.addEventListener('load', onLoad, { once: true });
+
+  if (isTiffName(name)) {
+    state.tiffDecoding = true;
+    // Stop the browser from chewing on the unsupported TIFF bytes — the
+    // inline src in the HTML triggers a load attempt the moment the page
+    // parses, and if we let it finish we'd get a flash of "failed to load"
+    // before the decoded blob takes over.
+    img.removeAttribute('src');
+    decodeTiffToBlobUrl(uri).then((blobUrl) => {
+      if (myGen !== state.loadGen) {
+        URL.revokeObjectURL(blobUrl);
+        return;
+      }
+      freeCurrentBlobUrl();
+      state.currentBlobUrl = blobUrl;
+      img.src = blobUrl;
+    }).catch((err) => {
+      if (myGen !== state.loadGen) return;
+      console.warn('[image-overlay] TIFF decode failed', err);
+      state.tiffDecoding = false;
+      overlays.tl.innerHTML = `
+        <div class="title">${escapeHtml(state.filename)}</div>
+        <div class="meta dim">TIFF decode failed</div>`;
+      overlays.tl.classList.remove('empty');
+    });
+  } else {
+    // Switching from a TIFF to a non-TIFF — release the previous blob URL.
+    freeCurrentBlobUrl();
+    img.src = uri;
+  }
+}
+
 async function onImageReady(): Promise<void> {
   state.natural.w = img.naturalWidth;
   state.natural.h = img.naturalHeight;
@@ -916,13 +1028,30 @@ window.addEventListener('resize', () => {
   drawHistogram(histState.computed);
 });
 
-if (img.complete && img.naturalWidth > 0) {
-  void onImageReady();
+// Initial load. If we already opened a TIFF the inline <img src=...> in the
+// HTML kicked off a doomed load — re-route via utif. For non-TIFF, if the
+// inline src already finished loading by the time JS runs, fast-path
+// straight into onImageReady; otherwise wait for it.
+if (isTiffName(state.filename)) {
+  loadImageInto(state.currentUri, state.filename);
 } else {
-  img.addEventListener('load', () => void onImageReady(), { once: true });
+  state.loadGen += 1;
+  const initGen = state.loadGen;
+  if (img.complete && img.naturalWidth > 0) {
+    void onImageReady();
+  } else {
+    img.addEventListener('load', () => {
+      if (initGen !== state.loadGen) return;
+      void onImageReady();
+    }, { once: true });
+  }
 }
 
 img.addEventListener('error', () => {
+  // Suppress the inline-load error event that fires when the browser tries
+  // to render a TIFF natively — we route those through utif and report
+  // real failures from inside loadImageInto's catch.
+  if (state.tiffDecoding || isTiffName(state.filename)) return;
   overlays.tl.innerHTML = `
     <div class="title">${escapeHtml(state.filename)}</div>
     <div class="meta dim">failed to load preview</div>`;
@@ -1030,15 +1159,9 @@ function swapTo(idx: number): void {
   // Clear stale EXIF immediately so the previous image's data doesn't flash
   // through the next render() before exif reload finishes.
   state.exif = null;
-  // Bump generation so any pending load handler from a superseded swap bails.
-  state.loadGen += 1;
-  const myGen = state.loadGen;
-  const onLoad = () => {
-    if (myGen !== state.loadGen) return;
-    void onImageReady();
-  };
-  img.addEventListener('load', onLoad, { once: true });
-  img.src = sib.uri;
+  // loadImageInto bumps state.loadGen and wires the load handler with the
+  // race-safe gen check; works for both regular images and TIFF.
+  loadImageInto(sib.uri, sib.name);
   applyTransform();
   render();
 }
@@ -1105,13 +1228,7 @@ window.addEventListener('message', (ev) => {
     const bust = `${ctx.imageUri}${ctx.imageUri.includes('?') ? '&' : '?'}v=${msg.cacheBust}`;
     state.currentUri = bust;
     state.exif = null;
-    state.loadGen += 1;
-    const myGen = state.loadGen;
-    img.addEventListener('load', () => {
-      if (myGen !== state.loadGen) return;
-      void onImageReady();
-    }, { once: true });
-    img.src = bust;
+    loadImageInto(bust, state.filename);
   }
 });
 
