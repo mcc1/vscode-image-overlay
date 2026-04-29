@@ -16,9 +16,12 @@ shows metadata as small floating cards anchored in fixed corners.
 - **Fixed-slot layout.** Each kind of info has a dedicated corner so your
   eye learns where to look — no per-image shuffling:
   - **TL** — Capture: camera · lens · focal · f/ · shutter · ISO · date.
-  - **BL** — File: filename · dimensions · size · format · color mode · ©.
+    (Replaced by the full sectioned EXIF table when expanded with <kbd>E</kbd>.)
+  - **BL** — File: filename · dimensions · size · format · color mode · ©,
+    plus a `3 / 47` position counter when there's more than one sibling.
   - **TR** — GPS: inline OpenStreetMap thumbnail (clickable) or coords.
-  - **BR** — Zoom % / slideshow status pill.
+  - **BR** — Zoom % pill. While slideshow is playing it grows to
+    `▶ 1.5s · 100%`; the optional histogram panel parks just above it.
 - **Browse the folder.** <kbd>←</kbd> / <kbd>→</kbd> step through sibling
   images in the same folder. Sort by filename / mtime / ctime / size,
   ascending or descending — only supported formats are listed.
@@ -33,9 +36,14 @@ shows metadata as small floating cards anchored in fixed corners.
 - **Expanded EXIF mode.** Press <kbd>E</kbd> to replace the TL card with a
   sectioned full EXIF table (description / camera & lens / exposure /
   date & time / GPS / image / authoring).
-- **RGBA histogram** (opt-in). Press <kbd>H</kbd> to scan every pixel and
-  draw an additive R/G/B histogram (alpha curve overlaid when the image
-  has translucency). Off by default; resets each session.
+- **RGBA histogram** (opt-in). Press <kbd>H</kbd> to drop a 320×120 panel
+  above the BR zoom pill. Every pixel is counted in a Web Worker (zero-
+  copy buffer transfer) so even 100+ MP images don't block the UI.
+  Additive R/G/B curves with sqrt scaling so 0/255 spikes don't flatten
+  the rest; alpha curve is overlaid only when the image actually has
+  translucency. **Off by default**, and the toggle persists across images
+  for the duration of the VS Code session — only reloading VS Code resets
+  it.
 - **Inline GPS map.** When the file has GPS coordinates, the TR card shows
   a small OSM static map; click to open the full map in your configured
   provider.
@@ -81,7 +89,19 @@ needs a decoder; metadata works.
 | `imageOverlay.browseLoop` | `false` | Wrap around at the first / last image (also applies to slideshow). |
 | `imageOverlay.slideshowIntervalMs` | `3000` | Default slideshow interval in milliseconds. |
 
-## Install (local / private)
+## Install
+
+### From GitHub releases (prebuilt)
+
+Grab the latest `.vsix` from the
+[releases page](https://github.com/mcc1/vscode-image-overlay/releases)
+and run:
+
+```bash
+code --install-extension image-overlay-preview-0.1.1.vsix
+```
+
+### From source
 
 ```bash
 git clone https://github.com/mcc1/vscode-image-overlay.git
