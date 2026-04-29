@@ -1,5 +1,11 @@
 # Image Overlay Preview
 
+[![Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/mcc.image-overlay-preview?label=VS%20Code%20Marketplace&color=007ACC&logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/mcc.image-overlay-preview?color=blue)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview)
+[![Rating](https://img.shields.io/visual-studio-marketplace/r/mcc.image-overlay-preview?color=blue)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview&ssr=false#review-details)
+[![GitHub Release](https://img.shields.io/github/v/release/mcc1/vscode-image-overlay?include_prereleases&sort=semver&color=success)](https://github.com/mcc1/vscode-image-overlay/releases)
+[![License: MIT](https://img.shields.io/github/license/mcc1/vscode-image-overlay?color=lightgrey)](LICENSE)
+
 Preview images in VS Code with EXIF and file metadata shown as **unobtrusive
 glass overlays in the four corners** — the image stays center stage, no sidebar
 eating your horizontal space.
