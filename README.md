@@ -23,8 +23,9 @@ shows metadata as small floating cards anchored in fixed corners.
   eye learns where to look — no per-image shuffling:
   - **TL** — Capture: camera · lens · focal · f/ · shutter · ISO · date.
     (Replaced by the full sectioned EXIF table when expanded with <kbd>E</kbd>.)
-  - **BL** — File: filename · dimensions · size · format · color mode · ©,
-    plus a `3 / 47` position counter when there's more than one sibling.
+  - **BL** — File: filename · dimensions · size · format · color mode ·
+    color space · `HDR` chip · ©, plus a `3 / 47` position counter when
+    there's more than one sibling.
   - **TR** — GPS: inline OpenStreetMap thumbnail (clickable) or coords.
   - **BR** — Zoom % pill. While slideshow is playing it grows to
     `▶ 1.5s · 100%`; the optional histogram panel parks just above it.
@@ -50,6 +51,12 @@ shows metadata as small floating cards anchored in fixed corners.
   translucency. **Off by default**, and the toggle persists across images
   for the duration of the VS Code session — only reloading VS Code resets
   it.
+- **Color space label** in the file card — pulled from the ICC profile
+  description (most reliable for "Display P3" / "Adobe RGB" / etc.) with
+  fallback to the EXIF ColorSpace tag.
+- **HDR badge** in the file card when the image is a UltraHDR / Apple HDR
+  JPEG (XMP gain-map detection). AVIF / HEIC / PNG HDR transfer
+  characteristics aren't detected yet — would need raw box parsing.
 - **Inline GPS map.** When the file has GPS coordinates, the TR card shows
   a small OSM static map; click to open the full map in your configured
   provider.
@@ -61,10 +68,18 @@ shows metadata as small floating cards anchored in fixed corners.
 
 ## Supported formats
 
-Natively renderable: `PNG`, `JPG/JPEG`, `GIF`, `BMP`, `WebP`, `AVIF`, `ICO`.
-EXIF parsing (via [`exifr`](https://github.com/MikeKovarik/exifr)) works on
-JPEG / TIFF / HEIC / WebP. TIFF rendering is not yet supported — pixel data
-needs a decoder; metadata works.
+| Format | Renderer | Notes |
+| --- | --- | --- |
+| PNG / JPG / GIF / BMP / WebP / AVIF / ICO | `<img>` (native) | Whatever Chromium can decode shows up immediately. |
+| SVG | `<img>` (native) | |
+| TIFF / TIF | [`utif`](https://github.com/photopea/UTIF.js) (~30 KB) | Decoded client-side, blob-URL'd into `<img>`. First IFD only. |
+| HEIC / HEIF | [`libheif-js`](https://github.com/catdad-experiments/libheif-js) Web Worker (~1.4 MB, lazy) | The decoder bundle is fetched only the first time a HEIC opens. |
+| RAW (CR2/NEF/ARW/DNG…) | — | Out of scope; would need a per-vendor decoder. EXIF metadata still parses. |
+| JPEG XL | — | Out of scope. |
+
+EXIF / XMP / IPTC / ICC parsing (via
+[`exifr`](https://github.com/MikeKovarik/exifr)) covers all of the above
+that carry metadata.
 
 ## Keybindings
 
@@ -104,7 +119,7 @@ Grab the latest `.vsix` from the
 and run:
 
 ```bash
-code --install-extension image-overlay-preview-0.1.1.vsix
+code --install-extension image-overlay-preview-0.2.0.vsix
 ```
 
 ### From source
@@ -115,7 +130,7 @@ cd vscode-image-overlay
 npm install
 npm run build
 npx vsce package
-code --install-extension image-overlay-preview-0.1.1.vsix
+code --install-extension image-overlay-preview-0.2.0.vsix
 ```
 
 ## Development

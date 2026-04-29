@@ -70,6 +70,12 @@
             "filenamePattern": "*.tif"
           },
           {
+            "filenamePattern": "*.heic"
+          },
+          {
+            "filenamePattern": "*.heif"
+          },
+          {
             "filenamePattern": "*.ico"
           },
           {
@@ -190,6 +196,7 @@
   },
   "dependencies": {
     "exifr": "^7.1.3",
+    "libheif-js": "^1.19.8",
     "utif": "^3.1.0"
   }
 }

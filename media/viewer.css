@@ -256,6 +256,25 @@ body.expanded .corner.tl.cursor-near {
   margin-top: 4px;
 }
 
+/* HDR chip in the file card — small but loud, warm gold to suggest highlights. */
+.hdr-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: rgba(255, 200, 80, 0.16);
+  border: 1px solid rgba(255, 200, 80, 0.55);
+  color: rgba(255, 220, 130, 0.95);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  line-height: 14px;
+  /* The .meta.dim parent applies opacity:0.5 — opt out so HDR stays bright. */
+  opacity: 1;
+}
+.meta.dim:has(.hdr-chip) { opacity: 0.85; }
+
 .exif-section {
   margin-top: 10px;
 }

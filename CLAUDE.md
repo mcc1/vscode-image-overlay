@@ -29,10 +29,19 @@ competitors compress the image; corner overlays don't.
     so the expanded EXIF panel's larger footprint is handled correctly.
 - `media/viewer.css` — glass-style overlay styling; uses VS Code theme variables
   as the page background but keeps overlay colors fixed for image readability.
-- `esbuild.mjs` — two entrypoints: extension (node/cjs, `vscode` external) and
-  webview (browser/iife, bundles exifr). The histogram worker is **not** a
-  separate entrypoint — it's an inline string in main.ts loaded via `Blob` URL
-  to avoid build-pipeline overhead.
+- `src/webview/heic-worker.ts` — separate Web Worker for HEIC/HEIF decode.
+  Bundles `libheif-js/wasm-bundle` (~1.4 MB with WASM as base64). Lives in
+  its own esbuild entry so `dist/heic-worker.js` is fetched only when the
+  user actually opens a `.heic` / `.heif` file. Main thread spawns it via
+  `new Worker(ctx.heicWorkerUri)`, transfers the file's ArrayBuffer in,
+  receives RGBA pixels back via Transferable.
+- `media/viewer.css` — glass-style overlay styling; uses VS Code theme variables
+  as the page background but keeps overlay colors fixed for image readability.
+- `esbuild.mjs` — three entrypoints: extension (node/cjs, `vscode` external),
+  webview (browser/iife, bundles exifr + utif), and the HEIC worker (browser/
+  iife, bundles libheif-js). The histogram worker is **not** a separate
+  entrypoint — its source is a string inlined in main.ts and loaded via
+  `Blob` URL.
 - `.github/workflows/release.yml` — tag-driven CI that builds the vsix and
   attaches it to a GitHub release. See **Release process** below.
 
@@ -54,10 +63,13 @@ the built-in preview. Use "Reopen With…" to switch back for comparison.
 Webview CSP is strict: `default-src 'none'`. The script nonce is generated per
 resolve. Pieces that needed explicit allowance:
 - `connect-src ${cspSource}` — `main.ts` does `fetch(imageUri)` to get the
-  bytes for `exifr.parse`.
+  bytes for `exifr.parse` and TIFF/HEIC decode pipelines.
 - `img-src https://*.tile.openstreetmap.org` — inline GPS map thumbnails.
-- `worker-src blob:` and `script-src ... blob:` — the histogram Web Worker
-  is loaded from an inline `Blob` URL.
+- `script-src 'nonce-X' blob:` — the histogram worker's inline source is
+  loaded via a `Blob` URL.
+- `worker-src ${cspSource} blob:` — covers both the HEIC worker (loaded
+  from `dist/heic-worker.js` under cspSource) and the histogram worker
+  (blob URL).
 
 Don't loosen CSP further without a reason.
 
@@ -120,10 +132,27 @@ different MS account), the `vsce publish -p $VSCE_PAT` step can be added
 to the workflow and the manual upload step disappears.
 
 ## Format coverage
-`<img>` in webview handles PNG/JPG/GIF/BMP/WebP/AVIF/ICO natively. TIFF is
-registered but currently renders as broken — needs a decoder (e.g. `utif`) in a
-future pass. EXIF parsing via exifr works on JPG/TIFF/HEIC/WebP regardless of
-whether the `<img>` can render it.
+
+| Format | Renderer | Where in code |
+| --- | --- | --- |
+| PNG / JPG / GIF / BMP / WebP / AVIF / ICO / SVG | `<img>` native | `loadImageInto` non-decoder branch |
+| TIFF / TIF | `utif` (~30 KB, eagerly bundled into viewer.js) | `decodeTiffToBlobUrl` in main.ts |
+| HEIC / HEIF | `libheif-js` Web Worker (~1.4 MB, lazy chunk) | `decodeHeicToBlobUrl` + heic-worker.ts |
+
+Decoded images go through the same blob-URL → `<img>.src` path so the rest
+of the viewer (corner luminance, EXIF parse, histogram) doesn't care which
+decoder produced the pixels. EXIF parsing via exifr works on
+JPG / TIFF / HEIC / WebP regardless of whether the `<img>` could render it
+without help.
+
+### HDR / color space surfacing
+- ICC profile parse is enabled (`icc: true` in the exifr call) so the
+  file card can show "Display P3" / "Adobe RGB" / etc. Falls back to EXIF
+  ColorSpace tag when no ICC profile is present.
+- HDR detection only catches what exifr can read out of XMP today —
+  UltraHDR's `hdrgm:Version` and Apple HDR's `apple:HDREncoding`. AVIF /
+  HEIC HDR (signalled in the `nclx` colour box) and PNG `cICP` chunks
+  would need raw byte parsers we haven't written.
 
 ## Design decisions worth preserving
 - **No sidebar.** That's the whole pitch. Don't add a sidebar panel even for

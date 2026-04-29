@@ -25,6 +25,7 @@ interface InjectedCtx {
   browseLoop: boolean;
   slideshowIntervalMs: number;
   histogramOn: boolean;
+  heicWorkerUri: string;
 }
 
 const ctx = (window as unknown as { __IMG_CTX__: InjectedCtx }).__IMG_CTX__;
@@ -72,11 +73,12 @@ const state = {
   // a PNG blob and point img at that. Track the URL so we can revoke it
   // on the next swap (otherwise blob URLs accumulate in memory).
   currentBlobUrl: null as string | null,
-  // True between "we know this is TIFF" and "the decoded blob has loaded
-  // into <img>". The error handler uses this (alongside isTiffName) to
-  // suppress the inline-load error event the browser fires on the original
-  // unsupported TIFF bytes.
+  // True between "we know this is TIFF/HEIC" and "the decoded blob has
+  // loaded into <img>". The error handler uses these (alongside is*Name)
+  // to suppress the inline-load error event the browser fires on the
+  // original unsupported bytes.
   tiffDecoding: false,
+  heicDecoding: false,
 };
 
 // Slideshow tuning bounds.
@@ -280,6 +282,39 @@ function renderMapThumb(lat: number, lon: number, linkUrl: string | null, label:
     : `<div class="map-link static">${body}</div>`;
 }
 
+// Best-effort color-space detection. ICC profile description is the most
+// trustworthy signal — Apple iPhones tag JPEGs as ColorSpace=Uncalibrated
+// in EXIF and put the actual "Display P3" in the ICC profile. Falls back
+// to the EXIF ColorSpace tag for older / sRGB images.
+function describeColorSpace(e: Record<string, unknown> | null): string {
+  if (!e) return '';
+  const profileDesc = pick<string>(e, 'ProfileDescription');
+  if (profileDesc) {
+    const m = String(profileDesc).match(
+      /^(sRGB|Display P3|Adobe RGB|ProPhoto RGB|DCI-P3|Rec\.?\s*\d+)/i,
+    );
+    return m ? m[1] : profileDesc;
+  }
+  const cs = e.ColorSpace;
+  if (cs === 1 || cs === 'sRGB') return 'sRGB';
+  if (cs === 2 || cs === 'Adobe RGB' || cs === 'AdobeRGB') return 'Adobe RGB';
+  return '';
+}
+
+// HDR detection — covers the cases exifr can surface today:
+//  - UltraHDR / Adobe gain map JPEG: XMP namespace `hdrgm:` (ISO 21496)
+//  - Apple Adaptive HDR JPEG: XMP `apple:HDREncoding` or `AppleHDREncoding`
+// AVIF / HEIC HDR (transfer = HLG/PQ in nclx box) and HDR PNG (cICP) need
+// raw box parsing we don't do yet, so HDR JPEGs from Pixel / iPhone / Galaxy
+// are the main coverage now.
+function detectHdr(e: Record<string, unknown> | null): string {
+  if (!e) return '';
+  if (pick(e, 'hdrgm:Version', 'hdrgmVersion', 'HDRGain') != null) return 'UltraHDR';
+  const appleHdr = pick(e, 'AppleHDREncoding', 'apple:HDREncoding');
+  if (appleHdr === true || appleHdr === 'true' || appleHdr === 1) return 'Apple HDR';
+  return '';
+}
+
 function describeColorMode(e: Record<string, unknown> | null): string {
   // PNG IHDR colorType: 0=grayscale, 2=RGB, 3=palette, 4=grayscale+alpha, 6=RGB+alpha
   const colorType = e?.ColorType as number | undefined;
@@ -350,7 +385,21 @@ function buildFileHtml(): string {
   }
 
   const colorMode = describeColorMode(e);
-  if (colorMode) lines.push(`<div class="meta dim">${escapeHtml(colorMode)}</div>`);
+  const colorSpace = describeColorSpace(e);
+  const hdrFormat = detectHdr(e);
+  // One line that combines color depth/channels, color space, and HDR
+  // chip — keeps the file card compact instead of stacking three thin lines.
+  const colorParts: string[] = [];
+  if (colorMode) colorParts.push(escapeHtml(colorMode));
+  if (colorSpace) colorParts.push(escapeHtml(colorSpace));
+  const hdrChip = hdrFormat
+    ? `<span class="hdr-chip" title="${escapeAttr(hdrFormat)}">HDR</span>`
+    : '';
+  const colorJoined = colorParts.join(' · ');
+  if (colorJoined || hdrChip) {
+    const sep = colorJoined && hdrChip ? ' · ' : '';
+    lines.push(`<div class="meta dim">${colorJoined}${sep}${hdrChip}</div>`);
+  }
 
   const artist = pick<string>(e, 'Artist', 'Creator');
   const copyright = pick<string>(e, 'Copyright', 'Rights');
@@ -600,7 +649,10 @@ async function loadExif(uri: string): Promise<void> {
       tiff: true,
       xmp: true,
       iptc: true,
-      icc: false,
+      // ICC profile parse — small (~3 KB) and the only reliable source for
+      // "Display P3" / "Adobe RGB" / etc. since EXIF ColorSpace falls back
+      // to "Uncalibrated" on those.
+      icc: true,
       gps: true,
       ihdr: true,
       jfif: true,
@@ -658,6 +710,59 @@ function isTiffName(name: string): boolean {
   return ext === 'tif' || ext === 'tiff';
 }
 
+function isHeicName(name: string): boolean {
+  const ext = getExt(name).toLowerCase();
+  return ext === 'heic' || ext === 'heif';
+}
+
+// Webview can't render HEIC natively (Chromium drops the format on most
+// platforms). We dispatch to a libheif-js Web Worker — built as its own
+// 1.4 MB bundle and lazy-fetched the first time a HEIC opens. The decoded
+// RGBA comes back over a Transferable so we don't pay for a 100 MB copy.
+async function decodeHeicToBlobUrl(uri: string): Promise<string> {
+  const res = await fetch(uri);
+  if (!res.ok) throw new Error(`fetch ${res.status}`);
+  const buf = await res.arrayBuffer();
+
+  const worker = new Worker(ctx.heicWorkerUri);
+  let result: { rgba: Uint8ClampedArray; width: number; height: number };
+  try {
+    result = await new Promise<typeof result>((resolve, reject) => {
+      worker.onmessage = (e: MessageEvent) => {
+        const d = e.data as
+          | { ok: true; rgba: Uint8ClampedArray; width: number; height: number; hasAlpha: boolean }
+          | { ok: false; error: string };
+        if (!d.ok) { reject(new Error(d.error)); return; }
+        resolve({ rgba: d.rgba, width: d.width, height: d.height });
+      };
+      worker.onerror = (err) => reject(err);
+      worker.postMessage({ buffer: buf }, [buf]);
+    });
+  } finally {
+    worker.terminate();
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = result.width;
+  canvas.height = result.height;
+  const cctx = canvas.getContext('2d');
+  if (!cctx) throw new Error('no canvas 2d ctx');
+  // Same ArrayBufferLike → ArrayBuffer cast as the TIFF path: the rgba
+  // came from libheif which allocates a regular ArrayBuffer.
+  const clamped = new Uint8ClampedArray(
+    result.rgba.buffer as ArrayBuffer,
+    result.rgba.byteOffset,
+    result.rgba.byteLength,
+  );
+  cctx.putImageData(new ImageData(clamped, result.width, result.height), 0, 0);
+  return new Promise<string>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) { reject(new Error('canvas.toBlob returned null')); return; }
+      resolve(URL.createObjectURL(blob));
+    }, 'image/png');
+  });
+}
+
 async function decodeTiffToBlobUrl(uri: string): Promise<string> {
   const res = await fetch(uri);
   if (!res.ok) throw new Error(`fetch ${res.status}`);
@@ -700,11 +805,11 @@ function freeCurrentBlobUrl(): void {
   }
 }
 
-// Unified image loader. For non-TIFF the URI goes straight to img.src; for
-// TIFF we run the decode pipeline first. Either way, onImageReady fires
-// once the image is actually ready in <img> (load event) — this single
-// entry point lets nav, fileUpdate and the initial load share the gen-token
-// race-handling.
+// Unified image loader. For most formats the URI goes straight to img.src;
+// for TIFF and HEIC we run a decode pipeline first that produces a PNG
+// blob URL. Either way, onImageReady fires once the image is actually
+// ready in <img> (load event) — this single entry point lets nav,
+// fileUpdate and the initial load share the gen-token race-handling.
 function loadImageInto(uri: string, name: string): void {
   state.loadGen += 1;
   const myGen = state.loadGen;
@@ -712,18 +817,31 @@ function loadImageInto(uri: string, name: string): void {
   const onLoad = () => {
     if (myGen !== state.loadGen) return;
     state.tiffDecoding = false;
+    state.heicDecoding = false;
     void onImageReady();
   };
   img.addEventListener('load', onLoad, { once: true });
 
+  // Pick a decoder for formats <img> can't render natively.
+  let decode: ((u: string) => Promise<string>) | null = null;
+  let label = '';
   if (isTiffName(name)) {
     state.tiffDecoding = true;
-    // Stop the browser from chewing on the unsupported TIFF bytes — the
-    // inline src in the HTML triggers a load attempt the moment the page
-    // parses, and if we let it finish we'd get a flash of "failed to load"
-    // before the decoded blob takes over.
+    decode = decodeTiffToBlobUrl;
+    label = 'TIFF';
+  } else if (isHeicName(name)) {
+    state.heicDecoding = true;
+    decode = decodeHeicToBlobUrl;
+    label = 'HEIC';
+  }
+
+  if (decode) {
+    // Stop the browser from chewing on the unsupported bytes — the inline
+    // src in the HTML triggers a load attempt the moment the page parses,
+    // and if we let it finish we'd get a flash of "failed to load" before
+    // the decoded blob takes over.
     img.removeAttribute('src');
-    decodeTiffToBlobUrl(uri).then((blobUrl) => {
+    decode(uri).then((blobUrl) => {
       if (myGen !== state.loadGen) {
         URL.revokeObjectURL(blobUrl);
         return;
@@ -733,15 +851,17 @@ function loadImageInto(uri: string, name: string): void {
       img.src = blobUrl;
     }).catch((err) => {
       if (myGen !== state.loadGen) return;
-      console.warn('[image-overlay] TIFF decode failed', err);
+      console.warn(`[image-overlay] ${label} decode failed`, err);
       state.tiffDecoding = false;
+      state.heicDecoding = false;
       overlays.tl.innerHTML = `
         <div class="title">${escapeHtml(state.filename)}</div>
-        <div class="meta dim">TIFF decode failed</div>`;
+        <div class="meta dim">${label} decode failed</div>`;
       overlays.tl.classList.remove('empty');
     });
   } else {
-    // Switching from a TIFF to a non-TIFF — release the previous blob URL.
+    // Switching to a natively-renderable format — release any previous
+    // decode blob URL so we don't leak.
     freeCurrentBlobUrl();
     img.src = uri;
   }
@@ -1028,11 +1148,12 @@ window.addEventListener('resize', () => {
   drawHistogram(histState.computed);
 });
 
-// Initial load. If we already opened a TIFF the inline <img src=...> in the
-// HTML kicked off a doomed load — re-route via utif. For non-TIFF, if the
-// inline src already finished loading by the time JS runs, fast-path
-// straight into onImageReady; otherwise wait for it.
-if (isTiffName(state.filename)) {
+// Initial load. If we already opened a TIFF or HEIC the inline <img src=...>
+// in the HTML kicked off a doomed load — re-route via the right decoder.
+// For natively-supported formats, if the inline src already finished
+// loading by the time JS runs, fast-path straight into onImageReady;
+// otherwise wait for it.
+if (isTiffName(state.filename) || isHeicName(state.filename)) {
   loadImageInto(state.currentUri, state.filename);
 } else {
   state.loadGen += 1;
@@ -1049,9 +1170,10 @@ if (isTiffName(state.filename)) {
 
 img.addEventListener('error', () => {
   // Suppress the inline-load error event that fires when the browser tries
-  // to render a TIFF natively — we route those through utif and report
-  // real failures from inside loadImageInto's catch.
-  if (state.tiffDecoding || isTiffName(state.filename)) return;
+  // to render TIFF / HEIC natively — we route those through their decoders
+  // and report real failures from inside loadImageInto's catch.
+  if (state.tiffDecoding || state.heicDecoding) return;
+  if (isTiffName(state.filename) || isHeicName(state.filename)) return;
   overlays.tl.innerHTML = `
     <div class="title">${escapeHtml(state.filename)}</div>
     <div class="meta dim">failed to load preview</div>`;

@@ -6,9 +6,11 @@ interface ImageDocument extends vscode.CustomDocument {
 }
 
 // Formats we can render in the webview (must match package.json `customEditors.selector`).
-// TIFF rendering goes through utif in the webview; SVG is handled natively by `<img>`.
+// TIFF goes through utif, HEIC/HEIF goes through libheif-js worker; SVG is
+// handled natively by `<img>`.
 const SUPPORTED_EXTS: ReadonlySet<string> = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.avif', '.tiff', '.tif', '.ico', '.svg',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.avif',
+  '.tiff', '.tif', '.heic', '.heif', '.ico', '.svg',
 ]);
 
 interface SiblingItem {
@@ -224,6 +226,12 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     const styleUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'viewer.css')
     );
+    // Resolved up front and passed in via ctx so the webview doesn't need
+    // to know how to construct webview URIs. Lazy-loaded by main.ts only
+    // when a HEIC/HEIF file is opened.
+    const heicWorkerUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'heic-worker.js')
+    );
     const cspSource = webview.cspSource;
     const nonce = getNonce();
 
@@ -248,13 +256,14 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       browseLoop: ctx.browseLoop,
       slideshowIntervalMs: ctx.slideshowIntervalMs,
       histogramOn: ctx.histogramOn,
+      heicWorkerUri: heicWorkerUri.toString(),
     };
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob: https://tile.openstreetmap.org https://a.tile.openstreetmap.org https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob:; worker-src blob:; font-src ${cspSource}; connect-src ${cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob: https://tile.openstreetmap.org https://a.tile.openstreetmap.org https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob:; worker-src ${cspSource} blob:; font-src ${cspSource}; connect-src ${cspSource};">
 <link href="${styleUri}" rel="stylesheet">
 <title>${escapeHtml(ctx.filename)}</title>
 </head>

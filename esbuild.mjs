@@ -29,14 +29,28 @@ const webviewConfig = {
   target: 'es2020',
 };
 
+// HEIC decode worker — separate bundle so the main viewer doesn't carry
+// libheif's ~1.5 MB WASM payload unless the user actually opens a HEIC.
+// Loaded by main.ts via `new Worker(asWebviewUri(dist/heic-worker.js))`.
+const heicWorkerConfig = {
+  ...shared,
+  entryPoints: ['src/webview/heic-worker.ts'],
+  outfile: 'dist/heic-worker.js',
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2020',
+};
+
 if (watch) {
   const ctx1 = await esbuild.context(extensionConfig);
   const ctx2 = await esbuild.context(webviewConfig);
-  await Promise.all([ctx1.watch(), ctx2.watch()]);
+  const ctx3 = await esbuild.context(heicWorkerConfig);
+  await Promise.all([ctx1.watch(), ctx2.watch(), ctx3.watch()]);
   console.log('[esbuild] watching…');
 } else {
   await Promise.all([
     esbuild.build(extensionConfig),
     esbuild.build(webviewConfig),
+    esbuild.build(heicWorkerConfig),
   ]);
 }

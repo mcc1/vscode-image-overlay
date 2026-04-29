@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0 — HEIC, HDR badge, color space label
+
+- **HEIC / HEIF rendering** via [`libheif-js`](https://github.com/catdad-experiments/libheif-js)
+  in a dedicated Web Worker. Built as its own ~1.4 MB esbuild bundle
+  (`dist/heic-worker.js`) so the main viewer stays lean — the decoder
+  is only fetched the first time you actually open a HEIC. Decode runs
+  off-thread and the RGBA pixels come back as a Transferable (zero-copy),
+  so even Samsung S26U / iPhone 50 MP shots don't block the UI.
+- **Color space label** in the file card. Uses the ICC profile
+  description (most reliable for "Display P3" / "Adobe RGB" / etc.)
+  with a fallback to the EXIF ColorSpace tag. Apple devices in
+  particular tag JPEGs as ColorSpace=Uncalibrated and put the actual
+  P3 in the ICC profile, so this needed `icc: true` in the exifr call.
+- **HDR badge** in the file card when the image is a UltraHDR / Apple
+  HDR JPEG (XMP `hdrgm:Version` or `apple:HDREncoding`). AVIF / HEIC
+  HDR signalled in the `nclx` box and PNG `cICP` chunks aren't detected
+  yet — they'd need raw box parsers we don't have.
+- CSP relaxed to `worker-src ${cspSource} blob:` so the HEIC worker can
+  load from the extension dist directory. Histogram's blob worker keeps
+  working under the same rule.
+
 ## 0.1.4 — More format support: SVG and TIFF rendering
 
 - **SVG** — added to the custom-editor selector. `<img>` already renders
