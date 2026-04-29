@@ -68,15 +68,37 @@ sits on a tenant whose Azure DevOps PAT issuance was blocked
 through the manual web upload at
 `https://marketplace.visualstudio.com/manage/publishers/mcc`.
 
-**GitHub side IS automated** via `.github/workflows/release.yml`:
+**GitHub side IS automated** via `.github/workflows/release.yml`. There's
+a one-shot helper that drives the whole flow end-to-end:
 
 ```bash
-# 1. Edit CHANGELOG.md and add a "## 0.1.2 — title" section. The workflow
+# 0. Edit CHANGELOG.md and add a "## 0.1.2 — title" section. The workflow
 #    extracts this section as the GitHub release body, so the heading
-#    format must match: `^## <version> ` (space after, not a dash).
-# 2. Bump version + tag + push:
-npm version patch        # or: minor / major. Auto-commits + tags.
+#    format must match: `^## <version> ` (space after the version).
+# 1. Then:
+npm run release            # patch bump
+npm run release -- minor   # or minor / major
+```
+
+`scripts/release.mjs` does:
+1. `npm version <bump>` — bumps package.json + creates the git tag.
+2. `git push --follow-tags` — fires the workflow.
+3. Polls `gh run list` until the matching CI run appears, then
+   `gh run watch` to completion.
+4. `gh release download <tag> --pattern "*.vsix" -D dist-release/` — pulls
+   the freshly-built vsix back to the local machine (CI runs on Ubuntu,
+   so the artifact has to come back over the wire).
+5. Opens the marketplace publisher dashboard in the default browser; the
+   user drags the vsix in to push live.
+
+If you'd rather drive each step manually:
+
+```bash
+npm version patch
 git push --follow-tags
+# ...wait for CI...
+gh release download "v$(node -p 'require(`./package.json`).version')" \
+    --pattern "*.vsix" -D dist-release
 ```
 
 Pushing the tag fires the `Release` workflow:

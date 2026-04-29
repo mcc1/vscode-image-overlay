@@ -128,7 +128,8 @@
     "prod": "node esbuild.mjs --prod",
     "icon": "node scripts/gen-icon.mjs",
     "package": "npm run prod && vsce package",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release": "node scripts/release.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
