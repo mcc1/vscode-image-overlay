@@ -2,7 +2,7 @@
   "name": "image-overlay-preview",
   "displayName": "Image Overlay Preview",
   "description": "Preview images with EXIF and metadata shown as unobtrusive corner overlays — no sidebar, image stays center stage.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "mcc",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -30,7 +30,10 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Visualization", "Other"],
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
   "main": "./dist/extension.js",
   "activationEvents": [],
   "contributes": {
@@ -39,16 +42,36 @@
         "viewType": "imageOverlay.preview",
         "displayName": "Image Overlay Preview",
         "selector": [
-          { "filenamePattern": "*.png" },
-          { "filenamePattern": "*.jpg" },
-          { "filenamePattern": "*.jpeg" },
-          { "filenamePattern": "*.gif" },
-          { "filenamePattern": "*.bmp" },
-          { "filenamePattern": "*.webp" },
-          { "filenamePattern": "*.avif" },
-          { "filenamePattern": "*.tiff" },
-          { "filenamePattern": "*.tif" },
-          { "filenamePattern": "*.ico" }
+          {
+            "filenamePattern": "*.png"
+          },
+          {
+            "filenamePattern": "*.jpg"
+          },
+          {
+            "filenamePattern": "*.jpeg"
+          },
+          {
+            "filenamePattern": "*.gif"
+          },
+          {
+            "filenamePattern": "*.bmp"
+          },
+          {
+            "filenamePattern": "*.webp"
+          },
+          {
+            "filenamePattern": "*.avif"
+          },
+          {
+            "filenamePattern": "*.tiff"
+          },
+          {
+            "filenamePattern": "*.tif"
+          },
+          {
+            "filenamePattern": "*.ico"
+          }
         ],
         "priority": "default"
       }
@@ -73,7 +96,12 @@
         },
         "imageOverlay.gpsMapProvider": {
           "type": "string",
-          "enum": ["openstreetmap", "google", "apple", "none"],
+          "enum": [
+            "openstreetmap",
+            "google",
+            "apple",
+            "none"
+          ],
           "enumDescriptions": [
             "OpenStreetMap (privacy-friendly, no Google account)",
             "Google Maps",
@@ -85,7 +113,12 @@
         },
         "imageOverlay.browseSortBy": {
           "type": "string",
-          "enum": ["filename", "mtime", "ctime", "size"],
+          "enum": [
+            "filename",
+            "mtime",
+            "ctime",
+            "size"
+          ],
           "enumDescriptions": [
             "Filename (natural sort, case-insensitive)",
             "Last modified time",
@@ -97,7 +130,10 @@
         },
         "imageOverlay.browseSortOrder": {
           "type": "string",
-          "enum": ["asc", "desc"],
+          "enum": [
+            "asc",
+            "desc"
+          ],
           "default": "asc",
           "description": "Sort direction for sibling images."
         },
@@ -115,11 +151,22 @@
       }
     },
     "commands": [
-      { "command": "imageOverlay.toggleOverlay", "title": "Image Overlay: Toggle Overlay" },
-      { "command": "imageOverlay.toggleExpanded", "title": "Image Overlay: Toggle Expanded EXIF" }
+      {
+        "command": "imageOverlay.toggleOverlay",
+        "title": "Image Overlay: Toggle Overlay"
+      },
+      {
+        "command": "imageOverlay.toggleExpanded",
+        "title": "Image Overlay: Toggle Expanded EXIF"
+      }
     ],
     "keybindings": [
-      { "command": "imageOverlay.toggleOverlay", "key": "ctrl+shift+i", "mac": "cmd+shift+i", "when": "activeCustomEditorId == imageOverlay.preview" }
+      {
+        "command": "imageOverlay.toggleOverlay",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i",
+        "when": "activeCustomEditorId == imageOverlay.preview"
+      }
     ]
   },
   "scripts": {
