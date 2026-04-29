@@ -31,15 +31,30 @@ html, body {
 }
 #stage.dragging { cursor: grabbing; }
 
-#img {
+/* Wrapper carries the zoom/pan transform — keeps the <img> itself off the
+   GPU layer that would otherwise get tiled (which causes 1px seams across
+   large photos at certain scale factors). The <img> stays at natural size
+   inside the wrapper, so the compositor only ever rasterizes the small
+   transformed wrapper, not a tiled bitmap. */
+#img-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   max-width: 100%;
   max-height: 100%;
   transform-origin: center;
+  transition: transform 0.04s linear;
+  will-change: transform;
+}
+
+#img {
+  max-width: 100%;
+  max-height: 100%;
+  /* Kept on the element instead of the wrapper so naturalWidth/Height stay
+     authoritative for our analyzeCorners / histogram / EXIF pipelines. */
   image-rendering: auto;
   user-select: none;
   -webkit-user-drag: none;
-  transition: transform 0.04s linear;
-  will-change: transform;
 }
 
 .overlay {

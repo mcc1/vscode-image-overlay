@@ -36,6 +36,11 @@ declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 const vscodeApi = acquireVsCodeApi();
 
 const img = document.getElementById('img') as HTMLImageElement;
+// Zoom/pan transforms live on the wrapper, not on the <img> itself —
+// keeping <img> off the transform tree dodges Chromium's GPU-compositor
+// tile-seam bug that draws 1px black lines across large scaled images.
+// See media/viewer.css for the matching #img-wrap rules.
+const imgWrap = document.getElementById('img-wrap') as HTMLDivElement;
 const stage = document.getElementById('stage') as HTMLDivElement;
 const hint = document.getElementById('hint') as HTMLDivElement;
 
@@ -695,7 +700,8 @@ function detectAlpha(): void {
 }
 
 function applyTransform() {
-  img.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+  // Apply on the wrapper, not on the <img> directly — see imgWrap declaration.
+  imgWrap.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
   updateZoomDisplay();
 }
 

@@ -269,7 +269,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
 </head>
 <body>
   <div id="stage">
-    <img id="img" src="${imageWebUri}" alt="" draggable="false">
+    <div id="img-wrap"><img id="img" src="${imageWebUri}" alt="" draggable="false"></div>
   </div>
   <div id="overlay-tl" class="overlay corner tl"></div>
   <div id="overlay-tr" class="overlay corner tr"></div>

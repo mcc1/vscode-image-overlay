@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.2 — Fix 1px black lines on large scaled images
+
+- Some users were seeing thin horizontal black lines bleeding through
+  large photos that look fine in any other viewer. Root cause:
+  Chromium's GPU compositor tiles `<img>` elements that exceed the
+  max texture size, and tile boundaries become visible 1px seams at
+  certain scale factors when the element is also being CSS-transformed.
+- Fix: wrap `<img>` in a `#img-wrap` div and put the zoom/pan transform
+  on the wrapper instead of the image. `<img>` stays at natural size
+  on its own paint layer, so the compositor only rasterizes the smaller
+  wrapper layer — no tile seams.
+
 ## 0.2.1 — Fix HEIC decode (CSP wasm-unsafe-eval)
 
 - HEIC files were failing to decode in 0.2.0 with "HEIC decode failed"
