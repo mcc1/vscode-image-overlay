@@ -2,7 +2,7 @@
   "name": "image-overlay-preview",
   "displayName": "Image Overlay Preview",
   "description": "Preview images with EXIF and metadata shown as unobtrusive corner overlays — no sidebar, image stays center stage.",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "publisher": "mcc",
   "license": "MIT",
   "icon": "media/icon.png",
