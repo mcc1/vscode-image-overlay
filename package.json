@@ -2,7 +2,7 @@
   "name": "image-overlay-preview",
   "displayName": "Image Overlay Preview",
   "description": "Preview images with EXIF and metadata shown as unobtrusive corner overlays — no sidebar, image stays center stage.",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "publisher": "mcc",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -82,6 +82,35 @@
           ],
           "default": "openstreetmap",
           "description": "Map service to open when clicking GPS coordinates."
+        },
+        "imageOverlay.browseSortBy": {
+          "type": "string",
+          "enum": ["filename", "mtime", "ctime", "size"],
+          "enumDescriptions": [
+            "Filename (natural sort, case-insensitive)",
+            "Last modified time",
+            "Created time",
+            "File size"
+          ],
+          "default": "filename",
+          "description": "How sibling images in the same folder are ordered when browsing with arrow keys / slideshow."
+        },
+        "imageOverlay.browseSortOrder": {
+          "type": "string",
+          "enum": ["asc", "desc"],
+          "default": "asc",
+          "description": "Sort direction for sibling images."
+        },
+        "imageOverlay.browseLoop": {
+          "type": "boolean",
+          "default": false,
+          "description": "Wrap around when navigating past the first / last image (also applies to slideshow)."
+        },
+        "imageOverlay.slideshowIntervalMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 500,
+          "description": "Default slideshow interval in milliseconds. [ and ] adjust on the fly."
         }
       }
     },

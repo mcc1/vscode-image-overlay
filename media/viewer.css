@@ -241,6 +241,20 @@ body.expanded .corner.tl.cursor-near {
   font-weight: 500;
   letter-spacing: 0.02em;
 }
+.slideshow-tag {
+  /* Tinted accent so the play indicator visually separates from zoom %. */
+  color: #6cf;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Browse position ("3 / 47") in the BL file card — quieter than the rest. */
+.browse-pos {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  opacity: 0.5;
+  margin-top: 4px;
+}
 
 .exif-section {
   margin-top: 10px;
@@ -278,6 +292,52 @@ body.expanded .corner.tl.cursor-near {
 .exif-table td:last-child {
   word-break: break-word;
 }
+
+/* Histogram — opt-in floating panel, parked just above the BR zoom pill so
+   it lives in its own visual lane and never has to share the pill's pixels.
+   Right-edge aligned with the BR overlay (var(--ov-inset)). */
+#histogram {
+  position: fixed;
+  bottom: 56px;
+  right: var(--ov-inset);
+  display: none;
+  padding: 8px 8px 6px;
+  border-radius: 8px;
+  background: rgba(20, 20, 22, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  pointer-events: none;
+  z-index: 15;
+  transition: opacity 0.22s ease;
+}
+#histogram.on { display: block; }
+#histogram canvas {
+  display: block;
+  width: 320px;
+  height: 120px;
+}
+#histogram.computing canvas {
+  opacity: 0.25;
+}
+.hist-status {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.65);
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+#histogram.computing .hist-status,
+#histogram.on .hist-status:not(:empty) {
+  display: flex;
+}
+body.idle #histogram { opacity: 0.35; }
+body.overlay-hidden #histogram { display: none; }
 
 .hint {
   position: fixed;

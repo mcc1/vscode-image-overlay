@@ -1,5 +1,13 @@
 import exifr from 'exifr';
 
+interface SiblingItem {
+  uri: string;
+  name: string;
+  size: number;
+  mtime: number;
+  ctime: number;
+}
+
 interface InjectedCtx {
   filename: string;
   fileSize: number;
@@ -9,9 +17,19 @@ interface InjectedCtx {
   autoContrast: boolean;
   showHint: boolean;
   gpsMapProvider: 'openstreetmap' | 'google' | 'apple' | 'none';
+  siblings: SiblingItem[];
+  currentIndex: number;
+  browseLoop: boolean;
+  slideshowIntervalMs: number;
+  histogramOn: boolean;
 }
 
 const ctx = (window as unknown as { __IMG_CTX__: InjectedCtx }).__IMG_CTX__;
+
+// Webview → host channel (used to keep session-scoped UI flags like the
+// histogram toggle in sync across separate webviews of the same provider).
+declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
+const vscodeApi = acquireVsCodeApi();
 
 const img = document.getElementById('img') as HTMLImageElement;
 const stage = document.getElementById('stage') as HTMLDivElement;
@@ -35,10 +53,78 @@ const state = {
   exif: null as Record<string, unknown> | null,
   natural: { w: 0, h: 0 },
   currentUri: ctx.imageUri,
+  filename: ctx.filename,
   fileSize: ctx.fileSize,
   mtime: ctx.mtime,
   hasAlpha: null as boolean | null,
+  // Browse/slideshow — siblings come from the host already sorted+filtered.
+  currentIndex: ctx.currentIndex,
+  slideshowOn: false,
+  slideshowIntervalMs: ctx.slideshowIntervalMs,
+  // Generation token for image swaps. Each navigate() bumps this; pending
+  // image-load handlers compare against it and bail if superseded. Without
+  // this, fast ←/→ presses can race and call onImageReady() out of order.
+  loadGen: 0,
 };
+
+// Slideshow tuning bounds.
+const SLIDESHOW_MIN_MS = 500;
+const SLIDESHOW_MAX_MS = 30000;
+
+// Histogram — opt-in (H to toggle). State is session-scoped to the
+// extension-host process, NOT to the individual webview, so opening a
+// different image from Explorer keeps the histogram on. Initial value
+// arrives via ctx.histogramOn; toggle changes are pushed back to the host.
+interface HistData {
+  r: Uint32Array;
+  g: Uint32Array;
+  b: Uint32Array;
+  a: Uint32Array;
+  hasAlpha: boolean;
+}
+const histState = {
+  on: !!ctx.histogramOn,
+  computed: null as HistData | null,
+  // Generation token: each compute bumps this. Async chunks / worker
+  // callbacks check before committing results, so a toggle-off or image-swap
+  // mid-scan doesn't get its stale histogram painted.
+  gen: 0,
+};
+
+// Worker source — kept inline as a string so we don't need an extra esbuild
+// entrypoint. It's tiny and only runs once per scan. Loaded via Blob URL,
+// permitted by `worker-src blob:` in the CSP.
+const HISTOGRAM_WORKER_SRC = `
+self.onmessage = (e) => {
+  var buf = e.data.buffer;
+  var len = e.data.length;
+  var data = new Uint8ClampedArray(buf);
+  var r = new Uint32Array(256);
+  var g = new Uint32Array(256);
+  var b = new Uint32Array(256);
+  var a = new Uint32Array(256);
+  var alpha = false;
+  for (var i = 0; i < len; i += 4) {
+    r[data[i]]++;
+    g[data[i + 1]]++;
+    b[data[i + 2]]++;
+    var av = data[i + 3];
+    a[av]++;
+    if (av < 255) alpha = true;
+  }
+  self.postMessage(
+    { r: r, g: g, b: b, a: a, hasAlpha: alpha },
+    [r.buffer, g.buffer, b.buffer, a.buffer]
+  );
+};
+`;
+let histWorkerBlobUrl: string | null = null;
+function getHistWorkerUrl(): string {
+  if (histWorkerBlobUrl) return histWorkerBlobUrl;
+  const blob = new Blob([HISTOGRAM_WORKER_SRC], { type: 'application/javascript' });
+  histWorkerBlobUrl = URL.createObjectURL(blob);
+  return histWorkerBlobUrl;
+}
 
 // Fixed slot layout — info no longer migrates between corners. Decided so
 // the eye learns where to look, instead of cards jumping per-image based on
@@ -215,9 +301,9 @@ function pick<T = unknown>(obj: Record<string, unknown> | null, ...keys: string[
 function buildFileHtml(): string {
   const { w, h } = state.natural;
   const e = state.exif || {};
-  const ext = getExt(ctx.filename);
+  const ext = getExt(state.filename);
   const lines: string[] = [];
-  lines.push(`<div class="title" title="${escapeHtml(ctx.filename)}">${escapeHtml(ctx.filename)}</div>`);
+  lines.push(`<div class="title" title="${escapeHtml(state.filename)}">${escapeHtml(state.filename)}</div>`);
   if (w && h) {
     const mp = (w * h / 1e6).toFixed(1);
     const ratio = gcdRatio(w, h);
@@ -237,6 +323,11 @@ function buildFileHtml(): string {
     artist && !copyright ? escapeHtml(String(artist)) : '',
   ].filter(Boolean).join(' · ');
   if (attribution) lines.push(`<div class="meta dim">${attribution}</div>`);
+
+  // Position counter — only when more than one image to browse through.
+  if (ctx.siblings.length > 1) {
+    lines.push(`<div class="meta dim browse-pos">${state.currentIndex + 1} / ${ctx.siblings.length}</div>`);
+  }
 
   return `<div class="card-section">${lines.join('')}</div>`;
 }
@@ -295,6 +386,12 @@ function buildGpsHtml(): string {
 
 function buildZoomHtml(): string {
   const pct = Math.round(state.zoom * 100);
+  // When slideshow is active, prepend a play-indicator + interval so the
+  // user can see the current speed at a glance. When idle, just zoom %.
+  if (state.slideshowOn) {
+    const sec = (state.slideshowIntervalMs / 1000).toFixed(state.slideshowIntervalMs < 1000 ? 1 : (state.slideshowIntervalMs % 1000 === 0 ? 0 : 1));
+    return `<div class="card-section"><div class="meta big zoom-pct"><span class="slideshow-tag">▶ ${sec}s</span> · ${pct}%</div></div>`;
+  }
   return `<div class="card-section"><div class="meta big zoom-pct">${pct}%</div></div>`;
 }
 
@@ -408,8 +505,8 @@ function renderExpanded() {
 
   const colorMode = describeColorMode(e);
   const header = `
-    <div class="title" title="${escapeHtml(ctx.filename)}">${escapeHtml(ctx.filename)}</div>
-    <div class="meta dim">${getExt(ctx.filename)} · ${fmtSize(state.fileSize)} · ${state.natural.w}×${state.natural.h}${colorMode ? ' · ' + escapeHtml(colorMode) : ''}</div>
+    <div class="title" title="${escapeHtml(state.filename)}">${escapeHtml(state.filename)}</div>
+    <div class="meta dim">${getExt(state.filename)} · ${fmtSize(state.fileSize)} · ${state.natural.w}×${state.natural.h}${colorMode ? ' · ' + escapeHtml(colorMode) : ''}</div>
   `;
 
   overlays[target].innerHTML = header + (renderedSections.length
@@ -478,7 +575,7 @@ async function loadExif(uri: string): Promise<void> {
 
 function detectAlpha(): void {
   // Skip formats that can't have alpha
-  const ext = getExt(ctx.filename).toLowerCase();
+  const ext = getExt(state.filename).toLowerCase();
   if (['jpg', 'jpeg', 'bmp'].includes(ext)) {
     state.hasAlpha = false;
     return;
@@ -518,7 +615,258 @@ async function onImageReady(): Promise<void> {
   render();
   await loadExif(state.currentUri);
   render();
+  // If the histogram is currently enabled, re-scan for the new image.
+  // Discards any in-flight scan via the generation token.
+  if (histState.on) {
+    void refreshHistogram();
+  }
 }
+
+// --- Histogram (full-pixel scan, opt-in via H) ---
+
+const histPanel = document.getElementById('histogram') as HTMLDivElement;
+const histCanvas = histPanel.querySelector('canvas') as HTMLCanvasElement;
+const histStatus = histPanel.querySelector('.hist-status') as HTMLDivElement;
+
+function setHistCanvasSize(): void {
+  // 320×120 logical, scaled for hi-DPI so the curves are crisp on retina.
+  const dpr = window.devicePixelRatio || 1;
+  histCanvas.width = Math.round(320 * dpr);
+  histCanvas.height = Math.round(120 * dpr);
+  histCanvas.style.width = '320px';
+  histCanvas.style.height = '120px';
+}
+
+async function computeHistogram(myGen: number): Promise<HistData | null> {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h) return null;
+
+  // Draw to canvas at natural size, then read raw pixel bytes. Very large
+  // images (>~16k on a side) may exceed Canvas2D limits — caught and
+  // reported via the status line.
+  let imgData: ImageData;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const cctx = canvas.getContext('2d', { willReadFrequently: false });
+    if (!cctx) return null;
+    cctx.drawImage(img, 0, 0);
+    imgData = cctx.getImageData(0, 0, w, h);
+  } catch (err) {
+    console.warn('[image-overlay] histogram: canvas/getImageData failed', err);
+    return null;
+  }
+
+  if (myGen !== histState.gen) return null;
+
+  // Try Worker. We hand off the pixel buffer as a Transferable so 96+ MB
+  // doesn't get cloned. Falls back to main-thread chunked scan if the
+  // Worker can't spawn (CSP, environment limits).
+  try {
+    return await computeViaWorker(imgData, myGen);
+  } catch (err) {
+    console.warn('[image-overlay] histogram worker failed; falling back to main thread', err);
+    return computeOnMainThread(imgData.data, myGen);
+  }
+}
+
+function computeViaWorker(imgData: ImageData, myGen: number): Promise<HistData | null> {
+  return new Promise<HistData | null>((resolve, reject) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(getHistWorkerUrl());
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    let settled = false;
+    const cancelTick = window.setInterval(() => {
+      if (settled) return;
+      if (myGen !== histState.gen) {
+        settled = true;
+        window.clearInterval(cancelTick);
+        worker.terminate();
+        resolve(null);
+      }
+    }, 50);
+    worker.onmessage = (e: MessageEvent) => {
+      if (settled) return;
+      settled = true;
+      window.clearInterval(cancelTick);
+      worker.terminate();
+      if (myGen !== histState.gen) { resolve(null); return; }
+      const d = e.data as { r: ArrayBufferLike; g: ArrayBufferLike; b: ArrayBufferLike; a: ArrayBufferLike; hasAlpha: boolean };
+      // Reconstruct typed-array views from the transferred buffers.
+      resolve({
+        r: new Uint32Array(d.r as ArrayBuffer),
+        g: new Uint32Array(d.g as ArrayBuffer),
+        b: new Uint32Array(d.b as ArrayBuffer),
+        a: new Uint32Array(d.a as ArrayBuffer),
+        hasAlpha: d.hasAlpha,
+      });
+    };
+    worker.onerror = (err) => {
+      if (settled) return;
+      settled = true;
+      window.clearInterval(cancelTick);
+      worker.terminate();
+      reject(err);
+    };
+    // Transfer the buffer (zero-copy) and tell the worker how many bytes
+    // to scan. After this point, imgData.data is detached on the main
+    // thread; we don't reference it again.
+    worker.postMessage(
+      { buffer: imgData.data.buffer, length: imgData.data.length },
+      [imgData.data.buffer],
+    );
+  });
+}
+
+async function computeOnMainThread(data: Uint8ClampedArray, myGen: number): Promise<HistData | null> {
+  // Fallback path. Larger chunks (4M bytes ≈ 1M pixels) than the previous
+  // version to amortize the ~4ms setTimeout(0) minimum that browsers
+  // enforce — fewer yields, less wall-clock overhead on huge images.
+  const r = new Uint32Array(256);
+  const g = new Uint32Array(256);
+  const b = new Uint32Array(256);
+  const a = new Uint32Array(256);
+  let alphaPresent = false;
+  const len = data.length;
+  const chunkBytes = 4_000_000;
+  for (let i = 0; i < len; i += chunkBytes) {
+    if (myGen !== histState.gen) return null;
+    const end = Math.min(i + chunkBytes, len);
+    for (let j = i; j < end; j += 4) {
+      r[data[j]]++;
+      g[data[j + 1]]++;
+      b[data[j + 2]]++;
+      const av = data[j + 3];
+      a[av]++;
+      if (av < 255) alphaPresent = true;
+    }
+    if (end < len) await new Promise((res) => setTimeout(res, 0));
+  }
+  return { r, g, b, a, hasAlpha: alphaPresent };
+}
+
+function drawHistogram(hist: HistData | null): void {
+  const cctx = histCanvas.getContext('2d');
+  if (!cctx) return;
+  const w = histCanvas.width;
+  const h = histCanvas.height;
+  cctx.clearRect(0, 0, w, h);
+  if (!hist) return;
+
+  // sqrt scale — without this, a single 0/255 spike (common in synthetic /
+  // logo / screenshot images) flattens the rest of the curve to nothing.
+  // Skip bin 0 and 255 when finding the max so peaks at the extremes don't
+  // blow out the dynamic range either.
+  const channels: Array<[Uint32Array, string]> = [
+    [hist.r, 'rgba(255, 70, 70, 0.55)'],
+    [hist.g, 'rgba(80, 220, 80, 0.55)'],
+    [hist.b, 'rgba(70, 150, 255, 0.55)'],
+  ];
+  let peak = 1;
+  for (const [arr] of channels) {
+    for (let i = 1; i < 255; i++) if (arr[i] > peak) peak = arr[i];
+  }
+  const peakSqrt = Math.sqrt(peak);
+
+  // Additive blending so overlapping channels read as lighter / whiter.
+  cctx.globalCompositeOperation = 'lighter';
+  for (const [arr, color] of channels) {
+    cctx.fillStyle = color;
+    cctx.beginPath();
+    cctx.moveTo(0, h);
+    for (let i = 0; i < 256; i++) {
+      const x = (i / 255) * w;
+      const y = h - Math.min(1, Math.sqrt(arr[i]) / peakSqrt) * h;
+      cctx.lineTo(x, y);
+    }
+    cctx.lineTo(w, h);
+    cctx.closePath();
+    cctx.fill();
+  }
+  cctx.globalCompositeOperation = 'source-over';
+
+  // Alpha overlay — only when the image actually has translucency,
+  // otherwise it's just a vertical line at 255 that adds noise.
+  if (hist.hasAlpha) {
+    let aPeak = 1;
+    for (let i = 0; i < 256; i++) if (hist.a[i] > aPeak) aPeak = hist.a[i];
+    const aPeakSqrt = Math.sqrt(aPeak);
+    cctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+    cctx.lineWidth = Math.max(1, (window.devicePixelRatio || 1));
+    cctx.beginPath();
+    for (let i = 0; i < 256; i++) {
+      const x = (i / 255) * w;
+      const y = h - Math.min(1, Math.sqrt(hist.a[i]) / aPeakSqrt) * h;
+      if (i === 0) cctx.moveTo(x, y);
+      else cctx.lineTo(x, y);
+    }
+    cctx.stroke();
+  }
+}
+
+async function refreshHistogram(): Promise<void> {
+  histState.gen += 1;
+  const myGen = histState.gen;
+  // Make sure the canvas has a size before any drawHistogram call further
+  // down — covers both the toggle path and the auto-init path where this
+  // function may run before the bottom-of-file init block does.
+  setHistCanvasSize();
+  // Don't clear `histState.computed` or repaint with null — we want to keep
+  // the previous histogram visible while the new scan runs, so navigating
+  // doesn't flash an empty box. The "computing…" status overlay (faded
+  // canvas underneath) is enough of a cue that work is happening.
+  histPanel.classList.add('on', 'computing');
+  histStatus.textContent = 'computing…';
+
+  const result = await computeHistogram(myGen);
+  if (myGen !== histState.gen) return;            // superseded mid-scan
+  if (!result) {
+    histStatus.textContent = 'unavailable';
+    histPanel.classList.remove('computing');
+    return;
+  }
+  histState.computed = result;
+  histPanel.classList.remove('computing');
+  histStatus.textContent = '';
+  drawHistogram(result);
+}
+
+function toggleHistogram(): void {
+  if (histState.on) {
+    histState.on = false;
+    // Bump generation so any in-flight scan bails before committing.
+    histState.gen += 1;
+    histState.computed = null;
+    histPanel.classList.remove('on', 'computing');
+  } else {
+    histState.on = true;
+    setHistCanvasSize();
+    void refreshHistogram();
+  }
+  // Mirror the new state back to the extension host so the next webview
+  // (e.g. when the user opens a different image from Explorer) inherits it.
+  vscodeApi.postMessage({ type: 'histogramToggle', value: histState.on });
+}
+
+// If the host says histogram should be on at startup, seed the panel
+// immediately. The actual scan happens later inside onImageReady once the
+// natural size is known.
+if (histState.on) {
+  setHistCanvasSize();
+  histPanel.classList.add('on');
+}
+
+window.addEventListener('resize', () => {
+  if (!histState.on) return;
+  setHistCanvasSize();
+  drawHistogram(histState.computed);
+});
 
 if (img.complete && img.naturalWidth > 0) {
   void onImageReady();
@@ -528,7 +876,7 @@ if (img.complete && img.naturalWidth > 0) {
 
 img.addEventListener('error', () => {
   overlays.tl.innerHTML = `
-    <div class="title">${escapeHtml(ctx.filename)}</div>
+    <div class="title">${escapeHtml(state.filename)}</div>
     <div class="meta dim">failed to load preview</div>`;
   overlays.tl.classList.remove('empty');
 });
@@ -573,6 +921,8 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'e' || e.key === 'E') {
     state.expanded = !state.expanded;
     render();
+  } else if (e.key === 'h' || e.key === 'H') {
+    toggleHistogram();
   } else if (e.key === '0') {
     state.zoom = 1; state.panX = 0; state.panY = 0;
     applyTransform();
@@ -580,8 +930,113 @@ window.addEventListener('keydown', (e) => {
     state.zoom = Math.min(32, state.zoom * 1.2); applyTransform();
   } else if (e.key === '-' || e.key === '_') {
     state.zoom = Math.max(0.05, state.zoom / 1.2); applyTransform();
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    navigate(-1, /*manual*/ true);
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    navigate(+1, /*manual*/ true);
+  } else if (e.key === ' ') {
+    // Space: toggle slideshow. Only meaningful when there's >1 image.
+    if (ctx.siblings.length > 1) {
+      e.preventDefault();
+      toggleSlideshow();
+    }
+  } else if (e.key === '[') {
+    adjustSlideshowSpeed(2);   // longer interval = slower
+  } else if (e.key === ']') {
+    adjustSlideshowSpeed(0.5); // shorter interval = faster
   }
 });
+
+// --- Browse / slideshow ---
+
+let slideshowTimer: number | null = null;
+
+function navigate(direction: -1 | 1, manual: boolean): void {
+  if (ctx.siblings.length <= 1) return;
+  let idx = state.currentIndex + direction;
+  if (idx < 0) idx = ctx.browseLoop ? ctx.siblings.length - 1 : 0;
+  else if (idx >= ctx.siblings.length) idx = ctx.browseLoop ? 0 : ctx.siblings.length - 1;
+  if (idx === state.currentIndex) {
+    // Hit a non-loop boundary. If slideshow is running, stop it cleanly so
+    // the user notices we ran out instead of silently sitting on the last
+    // image.
+    if (state.slideshowOn && !manual) stopSlideshow();
+    return;
+  }
+  swapTo(idx);
+}
+
+function swapTo(idx: number): void {
+  const sib = ctx.siblings[idx];
+  if (!sib) return;
+  state.currentIndex = idx;
+  state.filename = sib.name;
+  state.fileSize = sib.size;
+  state.mtime = sib.mtime;
+  state.currentUri = sib.uri;
+  // New image: reset transform — keeping zoom across different aspect
+  // ratios feels random. Pan/zoom is per-image intent.
+  state.zoom = 1; state.panX = 0; state.panY = 0;
+  // Clear stale EXIF immediately so the previous image's data doesn't flash
+  // through the next render() before exif reload finishes.
+  state.exif = null;
+  // Bump generation so any pending load handler from a superseded swap bails.
+  state.loadGen += 1;
+  const myGen = state.loadGen;
+  const onLoad = () => {
+    if (myGen !== state.loadGen) return;
+    void onImageReady();
+  };
+  img.addEventListener('load', onLoad, { once: true });
+  img.src = sib.uri;
+  applyTransform();
+  render();
+}
+
+function toggleSlideshow(): void {
+  if (state.slideshowOn) stopSlideshow();
+  else startSlideshow();
+}
+
+function startSlideshow(): void {
+  if (ctx.siblings.length <= 1) return;
+  state.slideshowOn = true;
+  scheduleSlideshowTick();
+  render();
+}
+
+function stopSlideshow(): void {
+  state.slideshowOn = false;
+  if (slideshowTimer != null) {
+    clearTimeout(slideshowTimer);
+    slideshowTimer = null;
+  }
+  render();
+}
+
+function scheduleSlideshowTick(): void {
+  if (slideshowTimer != null) clearTimeout(slideshowTimer);
+  slideshowTimer = window.setTimeout(() => {
+    if (!state.slideshowOn) return;
+    navigate(+1, /*manual*/ false);
+    if (state.slideshowOn) scheduleSlideshowTick();
+  }, state.slideshowIntervalMs);
+}
+
+function adjustSlideshowSpeed(factor: number): void {
+  const next = Math.max(SLIDESHOW_MIN_MS, Math.min(SLIDESHOW_MAX_MS,
+    Math.round(state.slideshowIntervalMs * factor)));
+  if (next === state.slideshowIntervalMs) return;
+  state.slideshowIntervalMs = next;
+  // If running, restart the timer so the new interval takes effect from now,
+  // not from whenever the previous tick was scheduled.
+  if (state.slideshowOn) scheduleSlideshowTick();
+  // Update the BR indicator immediately even when paused, so the user sees
+  // the new value before they hit play.
+  updateZoomDisplay();
+}
 
 window.addEventListener('message', (ev) => {
   const msg = ev.data;
@@ -593,13 +1048,22 @@ window.addEventListener('message', (ev) => {
     state.expanded = !state.expanded;
     render();
   } else if (msg.type === 'fileUpdate') {
+    // Disk-write notification for the originally-opened image. If the user
+    // has navigated away to a sibling, this is stale — ignore it (we'd be
+    // overwriting the wrong file's metadata).
+    if (state.currentIndex !== ctx.currentIndex) return;
     state.fileSize = msg.fileSize;
     state.mtime = msg.mtime;
     const bust = `${ctx.imageUri}${ctx.imageUri.includes('?') ? '&' : '?'}v=${msg.cacheBust}`;
     state.currentUri = bust;
-    img.src = bust;
     state.exif = null;
-    img.addEventListener('load', () => void onImageReady(), { once: true });
+    state.loadGen += 1;
+    const myGen = state.loadGen;
+    img.addEventListener('load', () => {
+      if (myGen !== state.loadGen) return;
+      void onImageReady();
+    }, { once: true });
+    img.src = bust;
   }
 });
 

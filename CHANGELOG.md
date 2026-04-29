@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.1 — RGBA histogram
+
+- Press `H` to toggle a floating RGBA histogram panel, parked just above
+  the BR zoom indicator.
+- **Full-pixel scan, off-thread.** The pixel buffer is transferred (zero-
+  copy) to a Web Worker so even 100+ MP images don't block the UI. Falls
+  back to a chunked main-thread scan if the Worker can't spawn.
+- Sqrt scale + masked-extreme-bins normalization so single 0/255 spikes
+  (icons, screenshots) don't flatten the rest of the curve.
+- Alpha curve overlays the RGB curves only when the image actually has
+  translucency.
+- **Session-scoped state lives in the extension host**, so opening a
+  different image from Explorer (which spawns a fresh webview) keeps the
+  histogram on. Resets only when VS Code reloads.
+- Auto re-scan when navigating to a new image while toggled on. The
+  previous histogram stays visible during the scan instead of flashing
+  empty; stale scans from superseded images are discarded via a
+  generation token.
+
+## 0.1.0 — Browse & slideshow
+
+- **Browse siblings** in the same folder with `←` / `→`. Sort criteria
+  (`filename` / `mtime` / `ctime` / `size`) and direction (`asc` / `desc`)
+  are configurable; only supported image formats are listed.
+- **Slideshow** with `Space` to play/pause; `[` slows down, `]` speeds up
+  (clamped 0.5–30 s). Default interval and wrap-around behavior are
+  configurable.
+- BL file card gets a position counter (`3 / 47`) when there's more than
+  one image in the folder.
+- BR zoom indicator gains an inline play indicator (`▶ 1.5s · 100%`) when
+  slideshow is running.
+- Image-swap logic uses a generation token so rapid ←/→ presses don't race.
+
 ## 0.0.1 — Initial release
 
 - Custom editor for `PNG / JPG / GIF / BMP / WebP / AVIF / ICO` (and TIFF metadata).

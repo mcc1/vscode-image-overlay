@@ -5,10 +5,36 @@ interface ImageDocument extends vscode.CustomDocument {
   readonly uri: vscode.Uri;
 }
 
+// Formats we can render in the webview (must match package.json `customEditors.selector`).
+// .tif/.tiff are listed because we still want metadata, even though `<img>` may not render them.
+const SUPPORTED_EXTS: ReadonlySet<string> = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.avif', '.tiff', '.tif', '.ico',
+]);
+
+interface SiblingItem {
+  fsPath: string;
+  uri: string;       // webview-uri string, ready to drop into <img src>
+  name: string;
+  size: number;
+  mtime: number;
+  ctime: number;
+}
+
+type SortBy = 'filename' | 'mtime' | 'ctime' | 'size';
+type SortOrder = 'asc' | 'desc';
+
 export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorProvider<ImageDocument> {
   public static readonly viewType = 'imageOverlay.preview';
 
   private activePanel: vscode.WebviewPanel | undefined;
+
+  // Session-scoped UI state shared across all webviews of this provider.
+  // Lifecycle = extension-host process: persists when the user clicks a
+  // different image (which spawns a fresh webview), resets only when the
+  // user reloads / quits VS Code. Deliberately NOT in workspaceState /
+  // globalState because that would survive restarts, which the user
+  // explicitly didn't want.
+  private histogramOn = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -40,8 +66,29 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     const autoContrast = config.get<boolean>('autoContrast', true);
     const showHint = config.get<boolean>('showHintOnOpen', true);
     const gpsMapProvider = config.get<string>('gpsMapProvider', 'openstreetmap');
+    const sortBy = (config.get<string>('browseSortBy', 'filename') as SortBy);
+    const sortOrder = (config.get<string>('browseSortOrder', 'asc') as SortOrder);
+    const browseLoop = config.get<boolean>('browseLoop', false);
+    const slideshowIntervalMs = Math.max(500,
+      config.get<number>('slideshowIntervalMs', 3000));
 
     const stat = await vscode.workspace.fs.stat(document.uri);
+
+    // Enumerate sibling images in the same folder. Sort once on host so the
+    // webview can navigate purely by index. ~1000 entries × ~200 bytes each
+    // is well under the postMessage limit; we send the whole list up front
+    // rather than round-tripping per nav for snap responsiveness during
+    // slideshow.
+    const siblings = await this.enumerateSiblings(
+      webviewPanel.webview,
+      document.uri,
+      sortBy,
+      sortOrder,
+    );
+    const currentIndex = Math.max(
+      0,
+      siblings.findIndex((s) => s.fsPath === document.uri.fsPath),
+    );
 
     webviewPanel.webview.html = this.buildHtml(
       webviewPanel.webview,
@@ -54,8 +101,23 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
         autoContrast,
         showHint,
         gpsMapProvider,
+        siblings,
+        currentIndex,
+        browseLoop,
+        slideshowIntervalMs,
+        histogramOn: this.histogramOn,
       }
     );
+
+    // Sync session-scoped UI toggles from webview back into the host so
+    // newly-opened images inherit the current state.
+    webviewPanel.webview.onDidReceiveMessage((msg: unknown) => {
+      if (!msg || typeof msg !== 'object') return;
+      const m = msg as { type?: string; value?: unknown };
+      if (m.type === 'histogramToggle') {
+        this.histogramOn = !!m.value;
+      }
+    });
 
     const setActive = (panel: vscode.WebviewPanel | undefined) => {
       this.activePanel = panel;
@@ -89,6 +151,54 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     webviewPanel.onDidDispose(() => watcher.dispose());
   }
 
+  private async enumerateSiblings(
+    webview: vscode.Webview,
+    currentUri: vscode.Uri,
+    sortBy: SortBy,
+    sortOrder: SortOrder,
+  ): Promise<SiblingItem[]> {
+    const dir = path.dirname(currentUri.fsPath);
+    const dirUri = vscode.Uri.file(dir);
+    let entries: [string, vscode.FileType][];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(dirUri);
+    } catch {
+      return [];
+    }
+    const items: SiblingItem[] = [];
+    for (const [name, type] of entries) {
+      if (type !== vscode.FileType.File) continue;
+      const ext = path.extname(name).toLowerCase();
+      if (!SUPPORTED_EXTS.has(ext)) continue;
+      const fullPath = path.join(dir, name);
+      try {
+        const s = await vscode.workspace.fs.stat(vscode.Uri.file(fullPath));
+        items.push({
+          fsPath: fullPath,
+          uri: webview.asWebviewUri(vscode.Uri.file(fullPath)).toString(),
+          name,
+          size: s.size,
+          mtime: s.mtime,
+          ctime: s.ctime,
+        });
+      } catch {
+        /* skip unreadable */
+      }
+    }
+    const cmp = (a: SiblingItem, b: SiblingItem): number => {
+      let r = 0;
+      if (sortBy === 'mtime') r = a.mtime - b.mtime;
+      else if (sortBy === 'ctime') r = a.ctime - b.ctime;
+      else if (sortBy === 'size') r = a.size - b.size;
+      else r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      // Tie-break by filename so order is deterministic across runs.
+      if (r === 0 && sortBy !== 'filename') r = a.name.localeCompare(b.name);
+      return sortOrder === 'desc' ? -r : r;
+    };
+    items.sort(cmp);
+    return items;
+  }
+
   private buildHtml(
     webview: vscode.Webview,
     imageUri: vscode.Uri,
@@ -100,6 +210,11 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       autoContrast: boolean;
       showHint: boolean;
       gpsMapProvider: string;
+      siblings: SiblingItem[];
+      currentIndex: number;
+      browseLoop: boolean;
+      slideshowIntervalMs: number;
+      histogramOn: boolean;
     }
   ): string {
     const imageWebUri = webview.asWebviewUri(imageUri);
@@ -121,13 +236,25 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       autoContrast: ctx.autoContrast,
       showHint: ctx.showHint,
       gpsMapProvider: ctx.gpsMapProvider,
+      siblings: ctx.siblings.map((s) => ({
+        // fsPath is internal — webview only needs uri/name/size/mtime/ctime
+        uri: s.uri,
+        name: s.name,
+        size: s.size,
+        mtime: s.mtime,
+        ctime: s.ctime,
+      })),
+      currentIndex: ctx.currentIndex,
+      browseLoop: ctx.browseLoop,
+      slideshowIntervalMs: ctx.slideshowIntervalMs,
+      histogramOn: ctx.histogramOn,
     };
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob: https://tile.openstreetmap.org https://a.tile.openstreetmap.org https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource}; connect-src ${cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob: https://tile.openstreetmap.org https://a.tile.openstreetmap.org https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob:; worker-src blob:; font-src ${cspSource}; connect-src ${cspSource};">
 <link href="${styleUri}" rel="stylesheet">
 <title>${escapeHtml(ctx.filename)}</title>
 </head>
@@ -139,7 +266,8 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
   <div id="overlay-tr" class="overlay corner tr"></div>
   <div id="overlay-bl" class="overlay corner bl"></div>
   <div id="overlay-br" class="overlay corner br"></div>
-  <div id="hint" class="hint"><kbd>I</kbd> toggle · <kbd>E</kbd> expand · <kbd>0</kbd> reset · scroll zoom · drag pan</div>
+  <div id="histogram"><canvas></canvas><div class="hist-status">computing…</div></div>
+  <div id="hint" class="hint"><kbd>I</kbd> toggle · <kbd>E</kbd> expand · <kbd>H</kbd> histogram · <kbd>0</kbd> reset · <kbd>←</kbd> <kbd>→</kbd> browse · <kbd>Space</kbd> slideshow</div>
   <script nonce="${nonce}">window.__IMG_CTX__ = ${JSON.stringify(injectedCtx)};</script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
