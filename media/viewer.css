@@ -31,27 +31,25 @@ html, body {
 }
 #stage.dragging { cursor: grabbing; }
 
-/* Wrapper carries the zoom/pan transform — keeps the <img> itself off the
-   GPU layer that would otherwise get tiled (which causes 1px seams across
-   large photos at certain scale factors). The <img> stays at natural size
-   inside the wrapper, so the compositor only ever rasterizes the small
-   transformed wrapper, not a tiled bitmap. */
+/* Pan-only wrapper. Carries `transform: translate(panX, panY)` — translate
+   never triggers GPU compositor tiling (only `scale()` on big elements
+   does), so the wrapper stays a single small layer regardless of how big
+   the image is. */
 #img-wrap {
   display: flex;
   align-items: center;
   justify-content: center;
-  max-width: 100%;
-  max-height: 100%;
   transform-origin: center;
-  transition: transform 0.04s linear;
-  will-change: transform;
 }
 
 #img {
+  /* Zoom is applied by setting explicit pixel width/height in main.ts's
+     applyTransform(). The browser then rasterizes the image at the actual
+     display size — no GPU `scale()` over a tiled bitmap, so no 1px tile
+     seams on large photos. max-width/max-height handle the pre-load state
+     before applyTransform sets explicit pixels. */
   max-width: 100%;
   max-height: 100%;
-  /* Kept on the element instead of the wrapper so naturalWidth/Height stay
-     authoritative for our analyzeCorners / histogram / EXIF pipelines. */
   image-rendering: auto;
   user-select: none;
   -webkit-user-drag: none;

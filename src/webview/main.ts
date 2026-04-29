@@ -700,8 +700,36 @@ function detectAlpha(): void {
 }
 
 function applyTransform() {
-  // Apply on the wrapper, not on the <img> directly — see imgWrap declaration.
-  imgWrap.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+  // Pan is a translate on the wrapper — translate never GPU-tiles. Zoom
+  // is applied as explicit pixel width/height on the <img>; the browser
+  // rasterizes at the actual display size so the compositor never scales
+  // a tiled bitmap (which is what produced the 1px tile-seam lines on
+  // large photos at non-integer scales).
+  imgWrap.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
+
+  if (state.natural.w && state.natural.h) {
+    const stageW = stage.clientWidth;
+    const stageH = stage.clientHeight;
+    // Default fit: contain in stage, never blow up past natural size at
+    // zoom=1 (matches the previous max-width/max-height: 100% behavior).
+    const fitScale = Math.min(
+      stageW / state.natural.w,
+      stageH / state.natural.h,
+      1,
+    );
+    const display = fitScale * state.zoom;
+    img.style.maxWidth = 'none';
+    img.style.maxHeight = 'none';
+    img.style.width = `${state.natural.w * display}px`;
+    img.style.height = `${state.natural.h * display}px`;
+  } else {
+    // No natural dims yet — let CSS max-width/max-height handle it.
+    img.style.width = '';
+    img.style.height = '';
+    img.style.maxWidth = '';
+    img.style.maxHeight = '';
+  }
+
   updateZoomDisplay();
 }
 
@@ -741,7 +769,15 @@ async function decodeHeicToBlobUrl(uri: string): Promise<string> {
         if (!d.ok) { reject(new Error(d.error)); return; }
         resolve({ rgba: d.rgba, width: d.width, height: d.height });
       };
-      worker.onerror = (err) => reject(err);
+      worker.onerror = (ev: ErrorEvent) => {
+        // ErrorEvent fields are sparse for cross-origin / WASM failures.
+        // Concatenate what we have so the UI shows something useful.
+        const detail =
+          ev.message ||
+          (ev.filename ? `${ev.filename}:${ev.lineno || '?'}` : '') ||
+          'worker error';
+        reject(new Error(detail));
+      };
       worker.postMessage({ buffer: buf }, [buf]);
     });
   } finally {
@@ -860,9 +896,13 @@ function loadImageInto(uri: string, name: string): void {
       console.warn(`[image-overlay] ${label} decode failed`, err);
       state.tiffDecoding = false;
       state.heicDecoding = false;
+      const detail = err instanceof Error ? err.message : String(err);
+      // Show the underlying error in the TL card too — without it the user
+      // has no signal beyond "didn't work" and we can't act on bug reports.
       overlays.tl.innerHTML = `
         <div class="title">${escapeHtml(state.filename)}</div>
-        <div class="meta dim">${label} decode failed</div>`;
+        <div class="meta dim">${label} decode failed</div>
+        <div class="meta dim" style="font-size:10px;opacity:0.7;word-break:break-word;">${escapeHtml(detail)}</div>`;
       overlays.tl.classList.remove('empty');
     });
   } else {
@@ -876,6 +916,10 @@ function loadImageInto(uri: string, name: string): void {
 async function onImageReady(): Promise<void> {
   state.natural.w = img.naturalWidth;
   state.natural.h = img.naturalHeight;
+  // Now that we know the image's natural dimensions, switch from CSS
+  // max-width/max-height to explicit pixel sizing — that's what avoids
+  // the GPU compositor tile-seam bug on big photos.
+  applyTransform();
   await analyzeCorners();
   detectAlpha();
   render();
@@ -1148,10 +1192,19 @@ if (histState.on) {
   histPanel.classList.add('on');
 }
 
+// Window resize: recompute fit-to-stage sizing, and redraw histogram if
+// it's on. RAF-coalesced so a window-drag doesn't trigger ten resizes.
+let resizeRafId: number | null = null;
 window.addEventListener('resize', () => {
-  if (!histState.on) return;
-  setHistCanvasSize();
-  drawHistogram(histState.computed);
+  if (resizeRafId != null) cancelAnimationFrame(resizeRafId);
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null;
+    applyTransform();
+    if (histState.on) {
+      setHistCanvasSize();
+      drawHistogram(histState.computed);
+    }
+  });
 });
 
 // Initial load. If we already opened a TIFF or HEIC the inline <img src=...>
@@ -1284,6 +1337,9 @@ function swapTo(idx: number): void {
   // New image: reset transform — keeping zoom across different aspect
   // ratios feels random. Pan/zoom is per-image intent.
   state.zoom = 1; state.panX = 0; state.panY = 0;
+  // Forget the old natural size so applyTransform doesn't briefly size
+  // the new image as if it had the previous image's dimensions.
+  state.natural.w = 0; state.natural.h = 0;
   // Clear stale EXIF immediately so the previous image's data doesn't flash
   // through the next render() before exif reload finishes.
   state.exif = null;

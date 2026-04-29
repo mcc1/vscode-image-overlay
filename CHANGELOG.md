@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3 — Real fix for tile seams + visible decode errors
+
+- Tile-seam fix in 0.2.2 was incomplete — wrapping `<img>` in a div
+  doesn't prevent the GPU compositor from tiling the underlying bitmap
+  when `transform: scale()` is applied to the wrapper. The seams still
+  showed up during zoom transitions on big photos.
+- Real fix: don't use `transform: scale()` for zoom at all. Set the
+  `<img>`'s `width` / `height` in pixels directly. The browser
+  rasterizes at the actual display size, no GPU compositor scale, no
+  tiles, no seams. Pan still uses `transform: translate()` on the
+  wrapper (translate doesn't tile).
+- HEIC decode errors now surface the underlying error message in the
+  TL card instead of a bare "HEIC decode failed". The `worker.onerror`
+  handler also extracts message / filename / lineno from the
+  `ErrorEvent` so cross-origin / WASM failures aren't swallowed.
+
 ## 0.2.2 — Fix 1px black lines on large scaled images
 
 - Some users were seeing thin horizontal black lines bleeding through
