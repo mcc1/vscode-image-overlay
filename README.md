@@ -1,8 +1,8 @@
 # Image Overlay Preview
 
-[![Marketplace](https://img.shields.io/visual-studio-marketplace/v/mcc.image-overlay-preview?label=VS%20Code%20Marketplace&color=007ACC&logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/mcc.image-overlay-preview?label=installs&color=blue)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview)
-[![Rating](https://img.shields.io/visual-studio-marketplace/r/mcc.image-overlay-preview?label=rating&color=blue)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview&ssr=false#review-details)
+[![VS Code Marketplace](https://vsmarketplacebadges.dev/version-short/mcc.image-overlay-preview.svg?label=VS%20Code%20Marketplace&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview)
+[![Installs](https://vsmarketplacebadges.dev/installs-short/mcc.image-overlay-preview.svg)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview)
+[![Rating](https://vsmarketplacebadges.dev/rating-star/mcc.image-overlay-preview.svg)](https://marketplace.visualstudio.com/items?itemName=mcc.image-overlay-preview&ssr=false#review-details)
 [![GitHub Release](https://img.shields.io/github/v/release/mcc1/vscode-image-overlay?include_prereleases&sort=semver&label=github&color=success)](https://github.com/mcc1/vscode-image-overlay/releases)
 [![License: MIT](https://img.shields.io/github/license/mcc1/vscode-image-overlay?label=license&color=lightgrey)](LICENSE)
 
