@@ -19,7 +19,8 @@
 // already exists, `gh release download --clobber` is idempotent.
 
 import { execSync, spawnSync } from 'node:child_process';
-import { readFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const RELEASE_DIR = 'dist-release';
@@ -113,9 +114,16 @@ run(`gh run watch ${runId} --exit-status`);
 
 step(`Downloading vsix from release ${tag}…`);
 mkdirSync(RELEASE_DIR, { recursive: true });
+// Wipe any vsix from previous releases so what's left is unambiguously the
+// build we're shipping. Avoids confusion when picking a file to drag.
+for (const f of readdirSync(RELEASE_DIR)) {
+  if (f.endsWith('.vsix')) unlinkSync(join(RELEASE_DIR, f));
+}
 run(`gh release download ${tag} --pattern "*.vsix" -D ${RELEASE_DIR} --clobber`);
 
 const downloaded = readdirSync(RELEASE_DIR).filter((n) => n.endsWith('.vsix'));
+const expected = `image-overlay-preview-${pkgVersion()}.vsix`;
+const target = downloaded.includes(expected) ? expected : downloaded[0];
 console.log(`✓ ${downloaded.length} file(s) in ./${RELEASE_DIR}/:`);
 for (const f of downloaded) console.log(`   ${f}`);
 
@@ -123,7 +131,7 @@ step('Opening marketplace publisher dashboard…');
 openInBrowser(PUBLISHER_URL);
 
 console.log(`
-Done. Drag ./${RELEASE_DIR}/${downloaded[0] || '*.vsix'} into the
+Done. Drag ./${RELEASE_DIR}/${target || '*.vsix'} into the
 "Update" dialog at:
   ${PUBLISHER_URL}
 `);
