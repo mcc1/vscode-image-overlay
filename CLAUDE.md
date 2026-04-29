@@ -65,8 +65,11 @@ resolve. Pieces that needed explicit allowance:
 - `connect-src ${cspSource}` — `main.ts` does `fetch(imageUri)` to get the
   bytes for `exifr.parse` and TIFF/HEIC decode pipelines.
 - `img-src https://*.tile.openstreetmap.org` — inline GPS map thumbnails.
-- `script-src 'nonce-X' blob:` — the histogram worker's inline source is
-  loaded via a `Blob` URL.
+- `script-src 'nonce-X' blob: 'wasm-unsafe-eval'` — `blob:` for the
+  histogram worker's inline source; `'wasm-unsafe-eval'` for the HEIC
+  worker, which `WebAssembly.instantiate()`s libheif's WASM blob.
+  Without `wasm-unsafe-eval` Chromium fails the compile step with
+  "Refused to compile or instantiate WebAssembly module".
 - `worker-src ${cspSource} blob:` — covers both the HEIC worker (loaded
   from `dist/heic-worker.js` under cspSource) and the histogram worker
   (blob URL).

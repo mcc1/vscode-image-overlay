@@ -263,7 +263,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob: https://tile.openstreetmap.org https://a.tile.openstreetmap.org https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob:; worker-src ${cspSource} blob:; font-src ${cspSource}; connect-src ${cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob: https://tile.openstreetmap.org https://a.tile.openstreetmap.org https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob: 'wasm-unsafe-eval'; worker-src ${cspSource} blob:; font-src ${cspSource}; connect-src ${cspSource};">
 <link href="${styleUri}" rel="stylesheet">
 <title>${escapeHtml(ctx.filename)}</title>
 </head>

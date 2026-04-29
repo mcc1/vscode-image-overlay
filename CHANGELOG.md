@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — Fix HEIC decode (CSP wasm-unsafe-eval)
+
+- HEIC files were failing to decode in 0.2.0 with "HEIC decode failed"
+  in the file card. Root cause: the CSP didn't allow WebAssembly
+  compilation, so libheif's WASM never got past `WebAssembly.instantiate()`.
+- Fix: add `'wasm-unsafe-eval'` to `script-src`. This is the modern,
+  scope-limited directive (vs full `'unsafe-eval'`) and propagates to
+  the HEIC worker through the parent webview's CSP.
+
 ## 0.2.0 — HEIC, HDR badge, color space label
 
 - **HEIC / HEIF rendering** via [`libheif-js`](https://github.com/catdad-experiments/libheif-js)
