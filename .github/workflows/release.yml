@@ -1,0 +1,96 @@
+name: Release
+
+# Trigger: pushing a tag like `v0.1.2` builds the vsix and creates a
+# GitHub release with it attached. Marketplace upload is still manual
+# (drag the vsix into https://marketplace.visualstudio.com/manage/...)
+# because vsce publish needs an Azure DevOps PAT we don't have.
+on:
+  push:
+    tags:
+      - 'v*'
+  # Manual fallback so we can re-run a release without re-pushing a tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to package and release (e.g. v0.1.2)'
+        required: true
+
+permissions:
+  contents: write   # needed to create / upload to the release
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # On manual dispatch, check out the requested tag explicitly.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
+      - name: Sanity check — package.json version matches tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          EXPECTED="v${PKG_VERSION}"
+          if [ "$TAG" != "$EXPECTED" ]; then
+            echo "::error::Tag '$TAG' does not match package.json version '$EXPECTED'."
+            echo "Bump package.json before tagging, or retag to match."
+            exit 1
+          fi
+          echo "Tag $TAG matches package.json version $PKG_VERSION."
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build & package vsix
+        run: npm run package
+
+      - name: Locate vsix
+        id: vsix
+        run: |
+          FILE=$(ls *.vsix | head -n 1)
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Built $FILE"
+
+      - name: Extract release notes for this version
+        id: notes
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          # Slice CHANGELOG.md between "## $PKG_VERSION" and the next "## " heading.
+          # awk/0 prints everything from the matched header up to (but not including)
+          # the next "## " line. Falls back to a placeholder if the section is missing
+          # so the release isn't blank.
+          awk -v ver="$PKG_VERSION" '
+            $0 ~ "^## " ver " " { found = 1; print; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "## ${PKG_VERSION}" > release-notes.md
+            echo "" >> release-notes.md
+            echo "_(No CHANGELOG entry found for this version.)_" >> release-notes.md
+          fi
+
+          echo "--- release notes preview ---"
+          cat release-notes.md
+          echo "--- end ---"
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: release-notes.md
+          files: ${{ steps.vsix.outputs.path }}
+          fail_on_unmatched_files: true
