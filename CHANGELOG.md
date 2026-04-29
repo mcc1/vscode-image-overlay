@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.2 — Tooling & docs
+
+- README: live VS Code Marketplace / Installs / Rating / GitHub Release /
+  License badges (using the actively-maintained `vsmarketplacebadges.dev`
+  service since shields.io retired its `visual-studio-marketplace/*`
+  endpoints).
+- README: install instructions split into "from releases (prebuilt
+  vsix)" vs "from source".
+- Tooling: tag-driven GitHub Actions release workflow, plus
+  `npm run release [patch|minor|major]` helper that drives the whole
+  flow end-to-end — bump → push tag → poll & watch CI → download the
+  built vsix → open marketplace dashboard for the manual upload step.
+- Docs: CLAUDE.md refreshed to match current architecture (fixed-slot
+  layout, host-scoped UI flags, inline-blob histogram worker) and now
+  documents the release process for future agents / contributors.
+
+No runtime behaviour changes vs 0.1.1.
+
 ## 0.1.1 — RGBA histogram
 
 - Press `H` to toggle a floating RGBA histogram panel, parked just above
