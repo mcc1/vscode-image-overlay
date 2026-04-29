@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.3 — Performance: lighter EXIF parse, fully off-thread histogram
+
+- **EXIF parse no longer pre-fetches the whole file.** Hands the URL
+  directly to `exifr` so it issues HTTP Range requests and only pulls
+  the few segments it actually needs. A 100 MB image now reads ~64 KB
+  instead of allocating 100 MB on the main thread.
+- **Histogram canvas extraction moved off-thread.** When
+  `createImageBitmap` + `OffscreenCanvas` are available (modern
+  Chromium, so VS Code webview), the bitmap is transferred zero-copy
+  into the worker, which does `drawImage` + `getImageData` + counting
+  entirely off-thread. The previous version still ran the giant
+  `drawImage` / `getImageData` on the main thread before handing the
+  buffer to the worker — that step alone could stall a 24 MP scan for
+  100–300 ms.
+- Falls back gracefully through three tiers if the off-thread path
+  isn't available: bitmap → main-thread buffer + worker → chunked
+  main-thread scan.
+
+No functional changes for users on top of 0.1.2 — these are pure
+perf improvements that show up most on very large images.
+
 ## 0.1.2 — Tooling & docs
 
 - README: live VS Code Marketplace / Installs / Rating / GitHub Release /

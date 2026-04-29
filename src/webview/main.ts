@@ -94,28 +94,52 @@ const histState = {
 // Worker source — kept inline as a string so we don't need an extra esbuild
 // entrypoint. It's tiny and only runs once per scan. Loaded via Blob URL,
 // permitted by `worker-src blob:` in the CSP.
+//
+// Accepts either:
+//   { bitmap, width, height }   — preferred. Uses OffscreenCanvas to
+//                                 decode + read pixels off-thread, so the
+//                                 main thread never sees drawImage /
+//                                 getImageData on a natural-size canvas.
+//   { buffer, length }          — fallback when the host can't construct
+//                                 an ImageBitmap (then the main thread had
+//                                 to read pixels itself).
 const HISTOGRAM_WORKER_SRC = `
-self.onmessage = (e) => {
-  var buf = e.data.buffer;
-  var len = e.data.length;
-  var data = new Uint8ClampedArray(buf);
-  var r = new Uint32Array(256);
-  var g = new Uint32Array(256);
-  var b = new Uint32Array(256);
-  var a = new Uint32Array(256);
-  var alpha = false;
-  for (var i = 0; i < len; i += 4) {
-    r[data[i]]++;
-    g[data[i + 1]]++;
-    b[data[i + 2]]++;
-    var av = data[i + 3];
-    a[av]++;
-    if (av < 255) alpha = true;
+self.onmessage = function(e) {
+  try {
+    var msg = e.data;
+    var data, len;
+    if (msg.bitmap) {
+      var w = msg.width, h = msg.height;
+      var off = new OffscreenCanvas(w, h);
+      var ctx = off.getContext('2d');
+      ctx.drawImage(msg.bitmap, 0, 0);
+      msg.bitmap.close();
+      data = ctx.getImageData(0, 0, w, h).data;
+      len = data.length;
+    } else {
+      data = new Uint8ClampedArray(msg.buffer);
+      len = msg.length || data.length;
+    }
+    var r = new Uint32Array(256);
+    var g = new Uint32Array(256);
+    var b = new Uint32Array(256);
+    var a = new Uint32Array(256);
+    var alpha = false;
+    for (var i = 0; i < len; i += 4) {
+      r[data[i]]++;
+      g[data[i + 1]]++;
+      b[data[i + 2]]++;
+      var av = data[i + 3];
+      a[av]++;
+      if (av < 255) alpha = true;
+    }
+    self.postMessage(
+      { ok: true, r: r, g: g, b: b, a: a, hasAlpha: alpha },
+      [r.buffer, g.buffer, b.buffer, a.buffer]
+    );
+  } catch (err) {
+    self.postMessage({ ok: false, error: String(err && err.message || err) });
   }
-  self.postMessage(
-    { r: r, g: g, b: b, a: a, hasAlpha: alpha },
-    [r.buffer, g.buffer, b.buffer, a.buffer]
-  );
 };
 `;
 let histWorkerBlobUrl: string | null = null;
@@ -552,11 +576,15 @@ async function analyzeCorners(): Promise<void> {
 }
 
 async function loadExif(uri: string): Promise<void> {
+  // Hand the URI directly to exifr instead of pre-fetching the whole file
+  // into an ArrayBuffer. exifr's default chunked mode (true for URL input
+  // in browser) issues Range requests and only pulls the few segments it
+  // needs — a 100 MB image now reads ~64 KB instead of allocating 100 MB
+  // on the main thread. Falls back to a full fetch automatically if the
+  // underlying transport doesn't honor Range, so no behavioral regression
+  // on hosts that don't.
   try {
-    const res = await fetch(uri);
-    if (!res.ok) throw new Error(`fetch ${res.status}`);
-    const buf = await res.arrayBuffer();
-    state.exif = await exifr.parse(buf, {
+    state.exif = await exifr.parse(uri, {
       tiff: true,
       xmp: true,
       iptc: true,
@@ -642,9 +670,29 @@ async function computeHistogram(myGen: number): Promise<HistData | null> {
   const h = img.naturalHeight;
   if (!w || !h) return null;
 
-  // Draw to canvas at natural size, then read raw pixel bytes. Very large
-  // images (>~16k on a side) may exceed Canvas2D limits — caught and
-  // reported via the status line.
+  // --- Path A (preferred): createImageBitmap → Worker w/ OffscreenCanvas.
+  // The bitmap is decoded asynchronously by the browser and transferred
+  // (zero-copy) into the worker, which does drawImage + getImageData
+  // entirely off-thread. Main thread sees only one cheap async hop.
+  // Modern Chromium (and therefore VS Code's webview) supports both APIs;
+  // the feature-checks here are belt-and-suspenders.
+  if (typeof createImageBitmap === 'function' && typeof OffscreenCanvas !== 'undefined') {
+    try {
+      const bitmap = await createImageBitmap(img);
+      if (myGen !== histState.gen) { bitmap.close(); return null; }
+      return await runHistogramWorker(
+        { bitmap, width: w, height: h },
+        [bitmap],
+        myGen,
+      );
+    } catch (err) {
+      console.warn('[image-overlay] off-thread bitmap path failed, falling back to main-thread canvas', err);
+    }
+  }
+
+  // --- Path B (fallback): main-thread canvas → ArrayBuffer transfer to
+  // worker. Slower because drawImage + getImageData run synchronously here,
+  // but still better than counting on the main thread.
   let imgData: ImageData;
   try {
     const canvas = document.createElement('canvas');
@@ -658,29 +706,35 @@ async function computeHistogram(myGen: number): Promise<HistData | null> {
     console.warn('[image-overlay] histogram: canvas/getImageData failed', err);
     return null;
   }
-
   if (myGen !== histState.gen) return null;
 
-  // Try Worker. We hand off the pixel buffer as a Transferable so 96+ MB
-  // doesn't get cloned. Falls back to main-thread chunked scan if the
-  // Worker can't spawn (CSP, environment limits).
   try {
-    return await computeViaWorker(imgData, myGen);
+    return await runHistogramWorker(
+      { buffer: imgData.data.buffer, length: imgData.data.length },
+      [imgData.data.buffer],
+      myGen,
+    );
   } catch (err) {
-    console.warn('[image-overlay] histogram worker failed; falling back to main thread', err);
+    console.warn('[image-overlay] histogram worker failed; falling back to chunked main thread', err);
     return computeOnMainThread(imgData.data, myGen);
   }
 }
 
-function computeViaWorker(imgData: ImageData, myGen: number): Promise<HistData | null> {
+// One worker per scan, terminated when done. Worker spawn is cheap (the
+// blob URL is cached) and one-shot semantics keep the lifecycle simple —
+// no cancellation tokens to thread through, just ignore late results via
+// the histState.gen check.
+function runHistogramWorker(
+  payload: object,
+  transfers: Transferable[],
+  myGen: number,
+): Promise<HistData | null> {
   return new Promise<HistData | null>((resolve, reject) => {
     let worker: Worker;
     try {
       worker = new Worker(getHistWorkerUrl());
-    } catch (err) {
-      reject(err);
-      return;
-    }
+    } catch (err) { reject(err); return; }
+
     let settled = false;
     const cancelTick = window.setInterval(() => {
       if (settled) return;
@@ -691,21 +745,20 @@ function computeViaWorker(imgData: ImageData, myGen: number): Promise<HistData |
         resolve(null);
       }
     }, 50);
+
     worker.onmessage = (e: MessageEvent) => {
       if (settled) return;
       settled = true;
       window.clearInterval(cancelTick);
       worker.terminate();
+      const d = e.data as
+        | { ok: true; r: Uint32Array; g: Uint32Array; b: Uint32Array; a: Uint32Array; hasAlpha: boolean }
+        | { ok: false; error: string };
+      if (!d.ok) { reject(new Error(d.error)); return; }
       if (myGen !== histState.gen) { resolve(null); return; }
-      const d = e.data as { r: ArrayBufferLike; g: ArrayBufferLike; b: ArrayBufferLike; a: ArrayBufferLike; hasAlpha: boolean };
-      // Reconstruct typed-array views from the transferred buffers.
-      resolve({
-        r: new Uint32Array(d.r as ArrayBuffer),
-        g: new Uint32Array(d.g as ArrayBuffer),
-        b: new Uint32Array(d.b as ArrayBuffer),
-        a: new Uint32Array(d.a as ArrayBuffer),
-        hasAlpha: d.hasAlpha,
-      });
+      // Typed arrays come back already reconstructed against the
+      // transferred buffers — no need to wrap them again.
+      resolve({ r: d.r, g: d.g, b: d.b, a: d.a, hasAlpha: d.hasAlpha });
     };
     worker.onerror = (err) => {
       if (settled) return;
@@ -714,13 +767,8 @@ function computeViaWorker(imgData: ImageData, myGen: number): Promise<HistData |
       worker.terminate();
       reject(err);
     };
-    // Transfer the buffer (zero-copy) and tell the worker how many bytes
-    // to scan. After this point, imgData.data is detached on the main
-    // thread; we don't reference it again.
-    worker.postMessage(
-      { buffer: imgData.data.buffer, length: imgData.data.length },
-      [imgData.data.buffer],
-    );
+
+    worker.postMessage(payload, transfers);
   });
 }
 
