@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.6 — Tests + small EXIF caption fix
+
+- **Tests.** Pure helpers extracted from `main.ts` into
+  `src/webview/lib/format.ts` and covered by 43 vitest cases under
+  `tests/`. `npm test` runs them; the release workflow now blocks
+  shipping if a helper regresses (typecheck → test → package).
+- Found a bug while writing the tests: `describeCaptureExtras` claimed
+  to "only show WhiteBalance when non-Auto" but actually let any string
+  through — so EXIF that wrote `WhiteBalance: "Auto"` showed up in the
+  capture card. Now correctly hidden.
+- No other behavior changes — this is groundwork for the v0.3.0
+  ISOBMFF / cICP parsers (will land as new files under `lib/` with
+  tests written first).
+
 ## 0.2.5 — Humanize ColorSpace=65535 in expanded EXIF
 
 - Phones (Samsung HEIC especially) write `EXIF.ColorSpace = 65535`

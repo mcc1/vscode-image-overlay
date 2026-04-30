@@ -51,8 +51,23 @@ npm install
 npm run build         # one-shot
 npm run watch         # dev
 npm run typecheck     # tsc --noEmit
+npm test              # vitest run (single pass)
+npm run test:watch    # vitest in watch mode
 ```
-Outputs to `dist/extension.js` and `dist/viewer.js`.
+Outputs to `dist/extension.js`, `dist/viewer.js`, and `dist/heic-worker.js`.
+
+## Tests
+
+Pure helpers — formatters, EXIF/XMP interpretation, slippy-tile math —
+live in `src/webview/lib/format.ts`. Tests live alongside in `tests/`
+and run via vitest. The release workflow runs `npm test` between
+typecheck and packaging, so a broken pure helper blocks shipping.
+
+When adding parsing code that doesn't need the DOM (e.g., the planned
+ISOBMFF box walker for HEIC/AVIF nclx and the PNG cICP chunk parser),
+**put it under `src/webview/lib/` and write tests in `tests/` first**.
+The webview's main.ts has too many top-level side effects (DOM lookups,
+`acquireVsCodeApi()`, image-load wiring) to import directly into a test.
 
 ## Debugging
 Open the project in VS Code, press F5 — launches an Extension Development Host.

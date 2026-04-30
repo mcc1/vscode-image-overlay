@@ -184,6 +184,8 @@
     "prod": "node esbuild.mjs --prod",
     "package": "npm run prod && vsce package",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "release": "node scripts/release.mjs"
   },
   "devDependencies": {
@@ -192,7 +194,8 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.21.5",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "^4.1.5"
   },
   "dependencies": {
     "exifr": "^7.1.3",

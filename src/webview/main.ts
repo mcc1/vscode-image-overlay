@@ -2,6 +2,15 @@ import exifr from 'exifr';
 // TIFF decoder. utif is CJS but esbuild handles interop; the namespace
 // import gives us the decode / decodeImage / toRGBA8 functions we need.
 import * as UTIF from 'utif';
+import {
+  fmtSize, fmtExposure, formatMaybeDate, getExt, gcdRatio,
+  escapeHtml, escapeAttr,
+  isTiffName, isHeicName,
+  pick,
+  formatExifColorSpace,
+  describeColorSpace, detectHdr, describeColorMode, describeCaptureExtras,
+  mapUrl, computeMapView,
+} from './lib/format.js';
 
 interface SiblingItem {
   uri: string;
@@ -180,95 +189,6 @@ function getHistWorkerUrl(): string {
 // contrast — not slot assignment.
 let lastCursor = { x: -1, y: -1 };
 
-function fmtSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function fmtExposure(v: unknown): string {
-  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return '';
-  if (v >= 1) return `${v}s`;
-  return `1/${Math.round(1 / v)}s`;
-}
-
-function fmtDate(ms: number): string {
-  return new Date(ms).toLocaleString();
-}
-
-function formatMaybeDate(v: unknown): string {
-  if (v instanceof Date) return v.toLocaleString();
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return new Date(v).toLocaleString();
-  return '';
-}
-
-function getExt(name: string): string {
-  const i = name.lastIndexOf('.');
-  return i < 0 ? '' : name.slice(i + 1).toUpperCase();
-}
-
-function gcdRatio(a: number, b: number): string {
-  if (!a || !b) return '';
-  const gcd = (x: number, y: number): number => (y ? gcd(y, x % y) : x);
-  const d = gcd(a, b);
-  return `${a / d}:${b / d}`;
-}
-
-function escapeHtml(s: string): string {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-}
-
-function escapeAttr(s: string): string {
-  return escapeHtml(s);
-}
-
-function mapUrl(lat: number, lon: number): string | null {
-  switch (ctx.gpsMapProvider) {
-    case 'google':
-      return `https://www.google.com/maps?q=${lat},${lon}`;
-    case 'apple':
-      return `https://maps.apple.com/?q=${lat},${lon}&ll=${lat},${lon}`;
-    case 'openstreetmap':
-      return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=15/${lat}/${lon}`;
-    case 'none':
-    default:
-      return null;
-  }
-}
-
-interface MapTile { url: string; left: number; top: number; }
-interface MapView { tiles: MapTile[]; width: number; height: number; }
-
-function computeMapView(lat: number, lon: number, zoom: number, w: number, h: number): MapView {
-  const n = Math.pow(2, zoom);
-  const xFrac = (lon + 180) / 360 * n;
-  const latRad = lat * Math.PI / 180;
-  const yFrac = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
-  const worldX = xFrac * 256;
-  const worldY = yFrac * 256;
-  const viewLeft = worldX - w / 2;
-  const viewTop = worldY - h / 2;
-  const tx0 = Math.floor(viewLeft / 256);
-  const tx1 = Math.floor((viewLeft + w - 1) / 256);
-  const ty0 = Math.floor(viewTop / 256);
-  const ty1 = Math.floor((viewTop + h - 1) / 256);
-  const tiles: MapTile[] = [];
-  const maxTile = n;
-  for (let ty = ty0; ty <= ty1; ty++) {
-    for (let tx = tx0; tx <= tx1; tx++) {
-      if (tx < 0 || ty < 0 || tx >= maxTile || ty >= maxTile) continue;
-      tiles.push({
-        url: `https://tile.openstreetmap.org/${zoom}/${tx}/${ty}.png`,
-        left: tx * 256 - viewLeft,
-        top: ty * 256 - viewTop,
-      });
-    }
-  }
-  return { tiles, width: w, height: h };
-}
-
 function renderMapThumb(lat: number, lon: number, linkUrl: string | null, label: string): string {
   const view = computeMapView(lat, lon, 13, 200, 130);
   const tiles = view.tiles.map((t) =>
@@ -285,91 +205,6 @@ function renderMapThumb(lat: number, lon: number, linkUrl: string | null, label:
   return linkUrl
     ? `<a class="map-link" href="${escapeAttr(linkUrl)}" title="Open in map">${body}</a>`
     : `<div class="map-link static">${body}</div>`;
-}
-
-// Best-effort color-space detection. ICC profile description is the most
-// trustworthy signal — Apple iPhones tag JPEGs as ColorSpace=Uncalibrated
-// in EXIF and put the actual "Display P3" in the ICC profile. Falls back
-// to the EXIF ColorSpace tag for older / sRGB images.
-function describeColorSpace(e: Record<string, unknown> | null): string {
-  if (!e) return '';
-  const profileDesc = pick<string>(e, 'ProfileDescription');
-  if (profileDesc) {
-    const m = String(profileDesc).match(
-      /^(sRGB|Display P3|Adobe RGB|ProPhoto RGB|DCI-P3|Rec\.?\s*\d+)/i,
-    );
-    return m ? m[1] : profileDesc;
-  }
-  const cs = e.ColorSpace;
-  if (cs === 1 || cs === 'sRGB') return 'sRGB';
-  if (cs === 2 || cs === 'Adobe RGB' || cs === 'AdobeRGB') return 'Adobe RGB';
-  return '';
-}
-
-// HDR detection — covers the cases exifr can surface today:
-//  - UltraHDR / Adobe gain map JPEG: XMP namespace `hdrgm:` (ISO 21496)
-//  - Apple Adaptive HDR JPEG: XMP `apple:HDREncoding` or `AppleHDREncoding`
-// AVIF / HEIC HDR (transfer = HLG/PQ in nclx box) and HDR PNG (cICP) need
-// raw box parsing we don't do yet, so HDR JPEGs from Pixel / iPhone / Galaxy
-// are the main coverage now.
-function detectHdr(e: Record<string, unknown> | null): string {
-  if (!e) return '';
-  if (pick(e, 'hdrgm:Version', 'hdrgmVersion', 'HDRGain') != null) return 'UltraHDR';
-  const appleHdr = pick(e, 'AppleHDREncoding', 'apple:HDREncoding');
-  if (appleHdr === true || appleHdr === 'true' || appleHdr === 1) return 'Apple HDR';
-  return '';
-}
-
-function describeColorMode(e: Record<string, unknown> | null): string {
-  // PNG IHDR colorType: 0=grayscale, 2=RGB, 3=palette, 4=grayscale+alpha, 6=RGB+alpha
-  const colorType = e?.ColorType as number | undefined;
-  const bits = pick<number>(e, 'BitDepth', 'BitsPerSample');
-  const parts: string[] = [];
-  if (typeof bits === 'number') parts.push(`${bits}-bit`);
-
-  if (typeof colorType === 'number') {
-    const ct = colorType === 0 ? 'Gray'
-      : colorType === 2 ? 'RGB'
-      : colorType === 3 ? 'Indexed'
-      : colorType === 4 ? 'Gray+A'
-      : colorType === 6 ? 'RGBA'
-      : '';
-    if (ct) parts.push(ct);
-  } else if (state.hasAlpha != null) {
-    parts.push(state.hasAlpha ? 'RGBA' : 'RGB');
-  }
-  return parts.join(' ');
-}
-
-function describeCaptureExtras(e: Record<string, unknown>): string[] {
-  const lines: string[] = [];
-
-  // White balance — only show when non-Auto
-  const wb = pick<string | number>(e, 'WhiteBalance');
-  const wbStr = typeof wb === 'string' ? wb : wb === 1 ? 'Manual WB' : '';
-  // Flash — only when fired / meaningful
-  const flash = pick<string | number>(e, 'Flash');
-  const flashStr = typeof flash === 'string'
-    ? (flash.toLowerCase().includes('no flash') ? '' : flash)
-    : typeof flash === 'number' && flash & 1 ? 'Flash fired' : '';
-  // Metering
-  const metering = pick<string>(e, 'MeteringMode');
-  const meteringStr = typeof metering === 'string' && metering !== 'Unknown' ? metering : '';
-  // Exposure compensation
-  const evc = pick<number>(e, 'ExposureBiasValue', 'ExposureCompensation');
-  const evcStr = typeof evc === 'number' && evc !== 0 ? `${evc > 0 ? '+' : ''}${evc} EV` : '';
-
-  const extras = [wbStr, flashStr, meteringStr, evcStr].filter(Boolean);
-  if (extras.length) lines.push(extras.join(' · '));
-  return lines;
-}
-
-function pick<T = unknown>(obj: Record<string, unknown> | null, ...keys: string[]): T | undefined {
-  if (!obj) return undefined;
-  for (const k of keys) {
-    if (obj[k] != null && obj[k] !== '') return obj[k] as T;
-  }
-  return undefined;
 }
 
 // --- Slot builders. Each returns either complete card HTML or '' if empty. ---
@@ -389,7 +224,7 @@ function buildFileHtml(): string {
     lines.push(`<div class="meta dim">${ext}${ext ? ' · ' : ''}${fmtSize(state.fileSize)}</div>`);
   }
 
-  const colorMode = describeColorMode(e);
+  const colorMode = describeColorMode(e, state.hasAlpha);
   const colorSpace = describeColorSpace(e);
   const hdrFormat = detectHdr(e);
   // One line that combines color depth/channels, color space, and HDR
@@ -470,7 +305,7 @@ function buildGpsHtml(): string {
   if (ctx.gpsMapProvider === 'none') {
     return `<div class="card-section"><div class="meta dim">◎ ${escapeHtml(gpsStr)}</div></div>`;
   }
-  const gpsUrl = mapUrl(lat, lon);
+  const gpsUrl = mapUrl(lat, lon, ctx.gpsMapProvider);
   return `<div class="card-section has-map">${renderMapThumb(lat, lon, gpsUrl, gpsStr)}</div>`;
 }
 
@@ -568,7 +403,8 @@ function renderExpanded() {
   const e = state.exif || {};
   const lat = pick<number>(e, 'latitude');
   const lon = pick<number>(e, 'longitude');
-  const gpsUrl = typeof lat === 'number' && typeof lon === 'number' ? mapUrl(lat, lon) : null;
+  const gpsUrl = typeof lat === 'number' && typeof lon === 'number'
+    ? mapUrl(lat, lon, ctx.gpsMapProvider) : null;
 
   const renderedSections: string[] = [];
   for (const section of sections) {
@@ -581,15 +417,7 @@ function renderExpanded() {
       if ((k === 'latitude' || k === 'longitude') && gpsUrl) {
         display = `<a href="${escapeAttr(gpsUrl)}" class="gps-link">${escapeHtml(display)}</a>`;
       } else if (k === 'ColorSpace') {
-        // EXIF ColorSpace is an enum exifr doesn't translate by default —
-        // 1 = sRGB, 2 = Adobe RGB, 65535 = Uncalibrated. Phones (esp.
-        // Samsung HEIC) almost always write 65535 because the actual color
-        // info lives in the HEIC nclx box, not EXIF.
-        const num = typeof v === 'number' ? v : Number(v);
-        if (num === 1) display = 'sRGB';
-        else if (num === 2) display = 'Adobe RGB';
-        else if (num === 65535) display = 'Uncalibrated';
-        else display = escapeHtml(display);
+        display = escapeHtml(formatExifColorSpace(v));
       } else {
         display = escapeHtml(display);
       }
@@ -603,7 +431,7 @@ function renderExpanded() {
     }
   }
 
-  const colorMode = describeColorMode(e);
+  const colorMode = describeColorMode(e, state.hasAlpha);
   const header = `
     <div class="title" title="${escapeHtml(state.filename)}">${escapeHtml(state.filename)}</div>
     <div class="meta dim">${getExt(state.filename)} · ${fmtSize(state.fileSize)} · ${state.natural.w}×${state.natural.h}${colorMode ? ' · ' + escapeHtml(colorMode) : ''}</div>
@@ -748,16 +576,6 @@ function applyTransform() {
 // route through utif: fetch bytes → decode IFD → toRGBA8 → canvas → PNG
 // blob URL → set img.src. Everything downstream (corners, EXIF, histogram)
 // keeps working because they all read from the live <img>.
-
-function isTiffName(name: string): boolean {
-  const ext = getExt(name).toLowerCase();
-  return ext === 'tif' || ext === 'tiff';
-}
-
-function isHeicName(name: string): boolean {
-  const ext = getExt(name).toLowerCase();
-  return ext === 'heic' || ext === 'heif';
-}
 
 // Webview can't render HEIC natively (Chromium drops the format on most
 // platforms). We dispatch to a libheif-js Web Worker — built as its own
