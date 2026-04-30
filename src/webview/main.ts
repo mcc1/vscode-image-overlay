@@ -753,12 +753,30 @@ function isHeicName(name: string): boolean {
 // platforms). We dispatch to a libheif-js Web Worker — built as its own
 // 1.4 MB bundle and lazy-fetched the first time a HEIC opens. The decoded
 // RGBA comes back over a Transferable so we don't pay for a 100 MB copy.
+
+// VS Code webview-resources sit on a different origin from the webview
+// itself, and `new Worker(url)` enforces same-origin. Workaround: fetch
+// the worker bundle, wrap it in a Blob, and spawn from the resulting
+// blob URL — blob URLs inherit the page origin, so same-origin passes.
+// Cached after first use so we don't re-fetch the 1.4 MB on every HEIC.
+let heicWorkerBlobUrl: string | null = null;
+async function getHeicWorkerBlobUrl(): Promise<string> {
+  if (heicWorkerBlobUrl) return heicWorkerBlobUrl;
+  const res = await fetch(ctx.heicWorkerUri);
+  if (!res.ok) throw new Error(`worker fetch ${res.status}`);
+  const src = await res.text();
+  const blob = new Blob([src], { type: 'application/javascript' });
+  heicWorkerBlobUrl = URL.createObjectURL(blob);
+  return heicWorkerBlobUrl;
+}
+
 async function decodeHeicToBlobUrl(uri: string): Promise<string> {
   const res = await fetch(uri);
   if (!res.ok) throw new Error(`fetch ${res.status}`);
   const buf = await res.arrayBuffer();
 
-  const worker = new Worker(ctx.heicWorkerUri);
+  const workerUrl = await getHeicWorkerBlobUrl();
+  const worker = new Worker(workerUrl);
   let result: { rgba: Uint8ClampedArray; width: number; height: number };
   try {
     result = await new Promise<typeof result>((resolve, reject) => {

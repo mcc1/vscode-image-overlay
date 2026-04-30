@@ -65,14 +65,17 @@ resolve. Pieces that needed explicit allowance:
 - `connect-src ${cspSource}` — `main.ts` does `fetch(imageUri)` to get the
   bytes for `exifr.parse` and TIFF/HEIC decode pipelines.
 - `img-src https://*.tile.openstreetmap.org` — inline GPS map thumbnails.
-- `script-src 'nonce-X' blob: 'wasm-unsafe-eval'` — `blob:` for the
-  histogram worker's inline source; `'wasm-unsafe-eval'` for the HEIC
-  worker, which `WebAssembly.instantiate()`s libheif's WASM blob.
-  Without `wasm-unsafe-eval` Chromium fails the compile step with
-  "Refused to compile or instantiate WebAssembly module".
-- `worker-src ${cspSource} blob:` — covers both the HEIC worker (loaded
-  from `dist/heic-worker.js` under cspSource) and the histogram worker
-  (blob URL).
+- `script-src 'nonce-X' blob: 'wasm-unsafe-eval'` — `blob:` because both
+  workers (histogram and HEIC) load from blob URLs;
+  `'wasm-unsafe-eval'` for the HEIC worker, which
+  `WebAssembly.instantiate()`s libheif's WASM blob.
+- `worker-src blob:` is sufficient. We don't actually load workers from
+  cspSource: webview-resource URIs are on a different origin
+  (`https://*.vscode-cdn.net`) than the webview itself
+  (`vscode-webview://...`), and `new Worker(url)` enforces same-origin.
+  So the HEIC worker bundle is fetched as text and re-wrapped in a Blob
+  before `new Worker(blobUrl)` — same trick the histogram worker uses
+  with its inlined source string.
 
 Don't loosen CSP further without a reason.
 

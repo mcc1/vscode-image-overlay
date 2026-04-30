@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.4 — Fix HEIC Worker spawn (same-origin policy)
+
+- HEIC was still failing in 0.2.3 with "Failed to construct 'Worker':
+  Script at 'https://...vscode-cdn.net/.../heic-worker.js' cannot be
+  accessed from origin 'vscode-webview://...'". VS Code webview-resource
+  URIs sit on a different origin from the webview document, and
+  `new Worker(url)` enforces same-origin — so the worker spawn was
+  failing before any of our code (or any CSP) got a chance to run.
+- Fix: fetch the worker bundle as text, wrap it in a `Blob`, and spawn
+  from the resulting blob URL. Blob URLs inherit the page origin, so
+  same-origin passes. The blob URL is cached after first use so we
+  don't re-fetch the 1.4 MB on every HEIC.
+
 ## 0.2.3 — Real fix for tile seams + visible decode errors
 
 - Tile-seam fix in 0.2.2 was incomplete — wrapping `<img>` in a div
