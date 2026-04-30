@@ -580,6 +580,16 @@ function renderExpanded() {
       // hyperlink GPS coords in the expanded table too
       if ((k === 'latitude' || k === 'longitude') && gpsUrl) {
         display = `<a href="${escapeAttr(gpsUrl)}" class="gps-link">${escapeHtml(display)}</a>`;
+      } else if (k === 'ColorSpace') {
+        // EXIF ColorSpace is an enum exifr doesn't translate by default —
+        // 1 = sRGB, 2 = Adobe RGB, 65535 = Uncalibrated. Phones (esp.
+        // Samsung HEIC) almost always write 65535 because the actual color
+        // info lives in the HEIC nclx box, not EXIF.
+        const num = typeof v === 'number' ? v : Number(v);
+        if (num === 1) display = 'sRGB';
+        else if (num === 2) display = 'Adobe RGB';
+        else if (num === 65535) display = 'Uncalibrated';
+        else display = escapeHtml(display);
       } else {
         display = escapeHtml(display);
       }

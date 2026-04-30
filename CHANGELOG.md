@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.5 — Humanize ColorSpace=65535 in expanded EXIF
+
+- Phones (Samsung HEIC especially) write `EXIF.ColorSpace = 65535`
+  meaning "Uncalibrated" — the actual color profile lives in the HEIC
+  `nclx` box. exifr doesn't translate this enum by default, so the
+  expanded EXIF panel was showing a bare `65535`.
+- The expanded panel now displays `sRGB` (1), `Adobe RGB` (2), or
+  `Uncalibrated` (65535) instead of the raw integer. The file card was
+  already skipping uncalibrated/unknown values, so it's unaffected.
+- Reading the actual color space (and HDR transfer characteristics) out
+  of the HEIC `nclx` box requires a small ISOBMFF box parser — coming
+  in 0.3.0 alongside AVIF / PNG cICP HDR detection.
+
 ## 0.2.4 — Fix HEIC Worker spawn (same-origin policy)
 
 - HEIC was still failing in 0.2.3 with "Failed to construct 'Worker':
