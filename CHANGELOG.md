@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.7 — Fix swap-flash + smoother pan
+
+- **Fixed: image flashed oversized during ←/→ swap (regression in 0.2.3).**
+  `swapTo` clears `state.natural.w/h`, which makes `applyTransform` clear
+  the inline width/height on `<img>` and fall back to CSS
+  `max-width/max-height: 100%`. Those percentages don't bind unless the
+  parent has a defined size — the flex-centered `#img-wrap` was
+  content-sized, so tall images rendered at full natural height for one
+  frame before `onImageReady` set explicit pixels. Fix: pin `#img-wrap`
+  to `width: 100%; height: 100%`.
+- **Smoother pan on overlay-heavy images.** `backdrop-filter` on the
+  corner cards was being recomputed every frame as the sibling
+  `#img-wrap`'s translate transform updated, causing visible stutter on
+  large photos. Adding `will-change: transform` to `.overlay` promotes
+  each card to its own composite layer so the blur can be cached.
+
 ## 0.2.6 — Tests + small EXIF caption fix
 
 - **Tests.** Pure helpers extracted from `main.ts` into

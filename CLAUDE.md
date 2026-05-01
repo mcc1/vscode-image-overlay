@@ -268,24 +268,6 @@ release-and-test through marketplace.
 - [ ] JPEG XL. No native Chromium support, big WASM, niche.
 
 ### Known weirdness (not yet investigated / not fixed)
-- **Image flashes oversized during ←/→ swap (regression in 0.2.3).**
-  swapTo resets `state.natural.w/h` to 0, which makes `applyTransform`
-  take its else branch and clear the inline `width` / `height` /
-  `maxWidth` / `maxHeight`. CSS `max-width: 100%; max-height: 100%`
-  is then supposed to constrain the new image during the brief window
-  before `onImageReady` runs and sets explicit pixels. But `max-height:
-  100%` only resolves when the parent has a defined height — the
-  flex-centered `#img-wrap` doesn't have one (cross-axis from
-  `align-items: center` is content-sized). So height is unconstrained
-  for that window and tall / large images render bigger than the stage
-  before snapping back. Two candidate fixes:
-   1. Wrap behaviour: opacity:0 the `<img>` during swap, fade back in
-      inside `onImageReady` after `applyTransform` has set the right
-      pixel size. Cleanest UX, no layout calculus.
-   2. Layout fix: give `#img-wrap` an explicit `height: 100%` (or use
-      the stage's flex sizing) so `max-height: 100%` can bind.
-- Backdrop-filter on overlays occasionally lags during rapid pan; might
-  need `transform: translateZ(0)` on the overlay layer.
 - VS Code side-by-side diff mode probably won't activate the custom
   editor (untested) — VS Code limitation, may be OK to ignore.
 
