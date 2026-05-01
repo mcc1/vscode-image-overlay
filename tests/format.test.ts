@@ -172,6 +172,18 @@ describe('detectHdr', () => {
     expect(detectHdr({ AppleHDREncoding: 'true' })).toBe('Apple HDR');
     expect(detectHdr({ 'apple:HDREncoding': 1 })).toBe('Apple HDR');
   });
+  it('prefers __hdrFormat from format-aware enrichment', () => {
+    // Synthetic key written by the AVIF/HEIC nclx + PNG cICP enrichment
+    // path. Beats every other signal because it comes from the codec's
+    // own bytes, not a heuristic over EXIF/XMP.
+    expect(detectHdr({ __hdrFormat: 'HDR10 (PQ)' })).toBe('HDR10 (PQ)');
+    expect(detectHdr({ __hdrFormat: 'HLG' })).toBe('HLG');
+    expect(detectHdr({
+      __hdrFormat: 'HDR10 (PQ)',
+      AppleHDREncoding: true,
+      'hdrgm:Version': '1.0',
+    })).toBe('HDR10 (PQ)');
+  });
   it('returns empty for SDR images', () => {
     expect(detectHdr({})).toBe('');
     expect(detectHdr({ Make: 'Canon', Model: '5D' })).toBe('');

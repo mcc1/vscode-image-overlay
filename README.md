@@ -51,12 +51,16 @@ shows metadata as small floating cards anchored in fixed corners.
   translucency. **Off by default**, and the toggle persists across images
   for the duration of the VS Code session — only reloading VS Code resets
   it.
-- **Color space label** in the file card — pulled from the ICC profile
-  description (most reliable for "Display P3" / "Adobe RGB" / etc.) with
-  fallback to the EXIF ColorSpace tag.
-- **HDR badge** in the file card when the image is a UltraHDR / Apple HDR
-  JPEG (XMP gain-map detection). AVIF / HEIC / PNG HDR transfer
-  characteristics aren't detected yet — would need raw box parsing.
+- **Color space label** in the file card — pulled from the most
+  trustworthy signal each format offers: PNG `cICP`, AVIF/HEIC `nclx`
+  (codec-independent code points), then ICC profile description, then
+  EXIF ColorSpace. So "Display P3" surfaces on iPhone HEICs that EXIF
+  flags as `Uncalibrated`, and "Rec.2020 PQ" surfaces on Samsung HDR
+  HEICs that don't carry ICC at all.
+- **HDR badge** in the file card. Catches the four real-world HDR
+  encodings: UltraHDR / Apple HDR JPEGs (XMP gain map), and HDR10 (PQ)
+  / HLG on AVIF / HEIC / PNG (transfer enum 16 / 18 in the codec's own
+  colour box).
 - **Inline GPS map.** When the file has GPS coordinates, the TR card shows
   a small OSM static map; click to open the full map in your configured
   provider.
@@ -79,7 +83,10 @@ shows metadata as small floating cards anchored in fixed corners.
 
 EXIF / XMP / IPTC / ICC parsing (via
 [`exifr`](https://github.com/MikeKovarik/exifr)) covers all of the above
-that carry metadata.
+that carry metadata. Wide-gamut and HDR signals on AVIF / HEIC / PNG
+come from a small in-tree ISOBMFF + PNG-chunk walker (`src/webview/lib/`,
+~120 lines, fully unit-tested) so we don't pay a parser dependency just
+for `nclx` / `cICP`.
 
 ## Keybindings
 

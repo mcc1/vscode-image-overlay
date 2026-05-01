@@ -11,6 +11,7 @@ import {
   describeColorSpace, detectHdr, describeColorMode, describeCaptureExtras,
   mapUrl, computeMapView,
 } from './lib/format.js';
+import { enrichFromBytes } from './lib/format-enrich.js';
 
 interface SiblingItem {
   uri: string;
@@ -508,6 +509,29 @@ async function loadExif(uri: string): Promise<void> {
   }
 }
 
+// Format-aware enrichment runs after exifr. exifr can't read the AVIF/HEIC
+// `nclx` colour box or the PNG `cICP` chunk, so on those formats EXIF
+// ColorSpace lies (`Uncalibrated`) and HDR detection misses HDR10 / HLG
+// entirely. We do a second pass on the raw bytes for HEIC/HEIF/AVIF/PNG,
+// fold the result into state.exif as `ProfileDescription` + `__hdrFormat`,
+// and let the existing render path surface them.
+async function enrichExifFromFormat(uri: string, name: string, gen: number): Promise<void> {
+  const ext = getExt(name).toLowerCase();
+  if (!['heic', 'heif', 'avif', 'png'].includes(ext)) return;
+  try {
+    const res = await fetch(uri);
+    if (!res.ok) return;
+    if (gen !== state.loadGen) return;
+    const buf = await res.arrayBuffer();
+    if (gen !== state.loadGen) return;
+    const enriched = enrichFromBytes(buf, ext);
+    if (Object.keys(enriched).length === 0) return;
+    state.exif = { ...(state.exif || {}), ...enriched };
+  } catch (err) {
+    console.warn('[image-overlay] format enrichment failed', err);
+  }
+}
+
 function detectAlpha(): void {
   // Skip formats that can't have alpha
   const ext = getExt(state.filename).toLowerCase();
@@ -769,7 +793,9 @@ async function onImageReady(): Promise<void> {
   await analyzeCorners();
   detectAlpha();
   render();
+  const myGen = state.loadGen;
   await loadExif(state.currentUri);
+  await enrichExifFromFormat(state.currentUri, state.filename, myGen);
   render();
   // If the histogram is currently enabled, re-scan for the new image.
   // Discards any in-flight scan via the generation token.

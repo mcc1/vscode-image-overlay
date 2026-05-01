@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 — Real wide-gamut / HDR detection
+
+The file card no longer relies on EXIF's `ColorSpace` tag (which on
+modern phones is almost always `Uncalibrated`) to label colour space.
+A second enrichment pass after exifr reads each format's own colour
+signal directly and folds it into the existing render path.
+
+- **AVIF / HEIC / HEIF.** New `src/webview/lib/iso-bmff.ts` walks the
+  ISOBMFF container down to the first `colr` box with `nclx` subtype,
+  pulling out the `(primaries, transfer, matrix, full_range)` enum
+  triple. Covered by 10 vitest cases over synthetic byte streams.
+- **PNG.** New `src/webview/lib/png-chunks.ts` walks the chunk stream
+  for `cICP` (HDR signal) and `iCCP` (ICC profile name fallback). 11
+  vitest cases.
+- **Friendly labels.** New `src/webview/lib/color-coding.ts` maps the
+  ITU-T H.273 enums to the names users actually want to see —
+  `Rec.2020 PQ`, `Rec.2020 HLG`, `Display P3`, `sRGB`, `Rec.709`. 12
+  vitest cases.
+- **HDR badge** now fires on AVIF / HEIC / PNG when transfer is PQ
+  (16) or HLG (18), in addition to the existing UltraHDR / Apple HDR
+  JPEG cases. The chip already existed; this just feeds it real data.
+- **No new dependency.** The two parsers are ~120 lines combined and
+  shipped in-tree under `lib/` — same pattern as the format helpers
+  extracted in 0.2.6.
+
+Test count: 43 → 86. Bundle (`viewer.js`) grew 366 KB → 372 KB.
+
 ## 0.2.7 — Fix swap-flash + smoother pan
 
 - **Fixed: image flashed oversized during ←/→ swap (regression in 0.2.3).**

@@ -195,46 +195,30 @@ without help.
 
 ## Roadmap
 
-### v0.3.0 — Real wide-gamut / HDR detection (next milestone)
+### Shipped: v0.3.0 — Real wide-gamut / HDR detection
 
-The point: stop relying on EXIF's ColorSpace tag (mostly `Uncalibrated` on
-modern phones) and read each format's own colour signals directly. Once
-this lands the file card can honestly say "Rec.2020 PQ" or "Display P3"
-on a Samsung HEIC / iPhone AVIF / HDR PNG.
+`src/webview/lib/iso-bmff.ts` (HEIC/AVIF nclx),
+`src/webview/lib/png-chunks.ts` (PNG cICP / iCCP) and
+`src/webview/lib/color-coding.ts` (H.273 enum → label) feed an
+enrichment pass in `enrichExifFromFormat` (main.ts) that writes
+synthetic `ProfileDescription` + `__hdrFormat` keys onto `state.exif`.
+`describeColorSpace` and the extended `detectHdr` consume those
+unchanged, so the file card now shows "Rec.2020 PQ" / "Display P3" on
+files where EXIF ColorSpace was `Uncalibrated`.
 
-**Test-first.** All three parsers below are pure byte ops, perfect for
-vitest. Write tests with small fixture files (committed under
-`tests/fixtures/`) before wiring into main.ts so we don't have to
-release-and-test through marketplace.
+If you need to extend this:
+- Add another container? Pattern is the same: parser under `lib/`
+  with vitest coverage, dispatched from `enrichFromBytes` (in
+  `lib/format-enrich.ts`) on the file extension. Keep the pure
+  parsers stateless so synthetic byte fixtures stay easy to write.
+- Want to surface another nclx/cICP enum (matrix, fullRange)? Both
+  triples are returned by the parsers — `format-enrich` just doesn't
+  forward them today. Extend the synthetic-key contract before
+  format.ts; don't reach into raw `nclx` from main.ts.
 
-- [ ] `src/webview/lib/iso-bmff.ts` — minimal ISOBMFF box walker.
-  - Walk path: top-level → `meta` → `iprp` → `ipco` → `colr`
-  - Parse `colr` `nclx` payload: `colour_primaries:u16`,
-    `transfer_characteristics:u16`, `matrix_coefficients:u16`,
-    `full_range_flag:u8` (high bit only)
-  - Returns `{ primaries, transfer, matrix, fullRange } | null`
-  - Covers HEIC, HEIF, AVIF, AVIF sequence (still take first frame)
-- [ ] `src/webview/lib/png-chunks.ts` — PNG chunk walker.
-  - Find chunks by name: `cICP` (HDR transfer/primaries — same enums
-    as nclx), `iCCP` (ICC profile name), `sBIT` (significant bits),
-    `tRNS` (transparency)
-  - cICP signals HDR PNG; iCCP can let us skip the per-pixel
-    `detectAlpha` step on confirmed-RGB files
-- [ ] `src/webview/lib/color-coding.ts` — pure helper that takes the
-      raw nclx / cICP triple and returns a friendly label using the
-      ITU-T H.273 enums. Examples:
-  - `(9, 16, 9)` → "Rec.2020 PQ" (HDR10)
-  - `(9, 18, 9)` → "Rec.2020 HLG"
-  - `(12, 13, 1)` → "Display P3"
-  - `(1, 13, 1)` → "sRGB"
-- [ ] Wire into the load flow: after exifr finishes, run a format-aware
-      enrichment pass. For HEIC/AVIF, fetch the file (or reuse the
-      buffer the HEIC decoder already has), walk the boxes, fold the
-      result back into `state.exif` as synthetic `ProfileDescription`
-      and HDR signals — everything downstream just works.
-- [ ] HDR badge fires on AVIF / HEIC / PNG when transfer ∈ {16 (PQ),
-      18 (HLG)}. The chip already exists; just feeds more cases.
-- [ ] CHANGELOG note + README format table updated.
+### Next milestone: nothing planned
+
+Roadmap is open. See backlog below for candidate items.
 
 ### Backlog (no version pinned)
 
@@ -242,8 +226,6 @@ release-and-test through marketplace.
 - [ ] Marketplace listing screenshots / a short animated GIF.
       User has to capture them; tooling pointer is ScreenToGif on Win.
       Drop into `media/screenshots/` and reference from README.
-- [ ] Update GitHub Actions to Node 24 before the Sep 2026 deadline
-      (currently CI prints a deprecation warning each run).
 - [ ] Tests for `provider.ts`'s sibling sort comparator — same lib/
       pattern, extract the comparator into something importable.
 
