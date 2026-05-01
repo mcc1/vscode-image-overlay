@@ -193,6 +193,86 @@ without help.
 - No metadata editing or EXIF stripping.
 - No AI / ComfyUI workflow parsing.
 
+## Roadmap
+
+### v0.3.0 — Real wide-gamut / HDR detection (next milestone)
+
+The point: stop relying on EXIF's ColorSpace tag (mostly `Uncalibrated` on
+modern phones) and read each format's own colour signals directly. Once
+this lands the file card can honestly say "Rec.2020 PQ" or "Display P3"
+on a Samsung HEIC / iPhone AVIF / HDR PNG.
+
+**Test-first.** All three parsers below are pure byte ops, perfect for
+vitest. Write tests with small fixture files (committed under
+`tests/fixtures/`) before wiring into main.ts so we don't have to
+release-and-test through marketplace.
+
+- [ ] `src/webview/lib/iso-bmff.ts` — minimal ISOBMFF box walker.
+  - Walk path: top-level → `meta` → `iprp` → `ipco` → `colr`
+  - Parse `colr` `nclx` payload: `colour_primaries:u16`,
+    `transfer_characteristics:u16`, `matrix_coefficients:u16`,
+    `full_range_flag:u8` (high bit only)
+  - Returns `{ primaries, transfer, matrix, fullRange } | null`
+  - Covers HEIC, HEIF, AVIF, AVIF sequence (still take first frame)
+- [ ] `src/webview/lib/png-chunks.ts` — PNG chunk walker.
+  - Find chunks by name: `cICP` (HDR transfer/primaries — same enums
+    as nclx), `iCCP` (ICC profile name), `sBIT` (significant bits),
+    `tRNS` (transparency)
+  - cICP signals HDR PNG; iCCP can let us skip the per-pixel
+    `detectAlpha` step on confirmed-RGB files
+- [ ] `src/webview/lib/color-coding.ts` — pure helper that takes the
+      raw nclx / cICP triple and returns a friendly label using the
+      ITU-T H.273 enums. Examples:
+  - `(9, 16, 9)` → "Rec.2020 PQ" (HDR10)
+  - `(9, 18, 9)` → "Rec.2020 HLG"
+  - `(12, 13, 1)` → "Display P3"
+  - `(1, 13, 1)` → "sRGB"
+- [ ] Wire into the load flow: after exifr finishes, run a format-aware
+      enrichment pass. For HEIC/AVIF, fetch the file (or reuse the
+      buffer the HEIC decoder already has), walk the boxes, fold the
+      result back into `state.exif` as synthetic `ProfileDescription`
+      and HDR signals — everything downstream just works.
+- [ ] HDR badge fires on AVIF / HEIC / PNG when transfer ∈ {16 (PQ),
+      18 (HLG)}. The chip already exists; just feeds more cases.
+- [ ] CHANGELOG note + README format table updated.
+
+### Backlog (no version pinned)
+
+**Polish**
+- [ ] Marketplace listing screenshots / a short animated GIF.
+      User has to capture them; tooling pointer is ScreenToGif on Win.
+      Drop into `media/screenshots/` and reference from README.
+- [ ] Update GitHub Actions to Node 24 before the Sep 2026 deadline
+      (currently CI prints a deprecation warning each run).
+- [ ] Tests for `provider.ts`'s sibling sort comparator — same lib/
+      pattern, extract the comparator into something importable.
+
+**Maybe**
+- [ ] Multi-image HEIC / AVIF sequence (burst photos) — show
+      `1/4` frame counter, `[` `]` could double up to cycle within file
+      when no slideshow is running. Conflicts with current slideshow
+      keys, would need a different chord.
+- [ ] PSD composite preview via `ag-psd`. Same lazy-worker shape as
+      HEIC. Niche but small effort.
+- [ ] Marketplace auto-publish via `vsce publish` in the release
+      workflow. **Blocked:** Azure DevOps PAT issuance fails with
+      `AADSTS5000225` on the current MS account. See "Release process".
+
+**Likely never**
+- [ ] HDR-aware histogram. Canvas2D readback is 8-bit sRGB regardless
+      of the source — would need WebGPU + float textures, much work
+      for limited audience.
+- [ ] RAW (CR2 / NEF / ARW / DNG / RAF). No good JS decoder; vendor
+      formats are huge surface. exifr already pulls metadata from RAW
+      so users can at least see capture info if they manually open one.
+- [ ] JPEG XL. No native Chromium support, big WASM, niche.
+
+### Known weirdness (not yet investigated)
+- Backdrop-filter on overlays occasionally lags during rapid pan; might
+  need `transform: translateZ(0)` on the overlay layer.
+- VS Code side-by-side diff mode probably won't activate the custom
+  editor (untested) — VS Code limitation, may be OK to ignore.
+
 ## Competitive context (as of 2026-04)
 | Extension | Display | Installs | Gap we fill |
 |---|---|---|---|
