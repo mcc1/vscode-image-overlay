@@ -105,13 +105,10 @@ export function describeColorSpace(e: Record<string, unknown> | null): string {
   return '';
 }
 
-// HDR detection. Three independent signals, in order of trust:
-//   1. `__hdrFormat` — synthetic key written by the format-aware enrichment
-//      pass when an AVIF/HEIC nclx or PNG cICP triple has transfer ∈ {16, 18}.
-//      Authoritative when present because we read the codec's own bytes.
-//   2. UltraHDR — XMP `hdrgm:Version` set by Google's UltraHDR JPEGs.
-//   3. Apple HDR — XMP `apple:HDREncoding` set by recent iOS HEICs that
-//      ALSO ship a gain map (independent of the nclx-only HDR10 path).
+// `__hdrFormat` is the authoritative signal (written by the format-aware
+// enrichment pass after reading an AVIF/HEIC nclx or PNG cICP triple);
+// XMP-based UltraHDR / Apple HDR markers are kept as backups for JPEGs
+// that don't have a codec-level signal.
 export function detectHdr(e: Record<string, unknown> | null): string {
   if (!e) return '';
   const fromFormat = pick<string>(e, '__hdrFormat');

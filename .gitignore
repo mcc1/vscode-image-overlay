@@ -9,3 +9,6 @@ Thumbs.db
 *.log
 .env
 .env.local
+synthetic-*.heic
+synthetic-*.png
+synthetic-*.avif

@@ -1,14 +1,8 @@
-// Format-aware enrichment: given the raw bytes of a HEIC/AVIF/PNG file,
-// pull out colour-space and HDR signals that exifr can't surface today,
-// and shape them so the existing render path picks them up unchanged.
-//
-// Output shape: a Record we can spread onto `state.exif`. Two keys:
-//   - `ProfileDescription` — friendly colour-space label. Populated whether
-//      we got the signal from nclx (HEIC/AVIF/PNG cICP) or from a PNG
-//      iCCP profile name. `describeColorSpace` already prefers this key,
-//      so the file card "just works".
-//   - `__hdrFormat` — synthetic key picked up by `detectHdr` (extended in
-//      format.ts). Set only when transfer is PQ (16) or HLG (18).
+// Dispatch by file extension to the right colour-signal parser, and shape
+// the result as keys we spread onto state.exif:
+//   ProfileDescription — friendly colour-space label (consumed by
+//                        describeColorSpace, which already prefers it).
+//   __hdrFormat        — synthetic key picked up by detectHdr.
 
 import { parseIsoBmffNclx } from './iso-bmff.js';
 import { findPngCicp, findPngIccpName } from './png-chunks.js';
@@ -40,8 +34,7 @@ export function enrichFromBytes(
       if (hdr) out.__hdrFormat = hdr;
       return out;
     }
-    // No cICP — fall back to iCCP profile name, which on real-world iPhone
-    // / Android PNG screenshots is the only signal of "Display P3".
+    // iCCP profile name is the only "Display P3" signal on iPhone/Android PNG screenshots.
     const name = findPngIccpName(buf);
     if (name) out.ProfileDescription = name;
     return out;

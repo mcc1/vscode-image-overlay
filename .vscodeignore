@@ -14,3 +14,6 @@ CLAUDE.md
 dist-release/**
 tests/**
 vitest.config.*
+synthetic-*.heic
+synthetic-*.png
+synthetic-*.avif

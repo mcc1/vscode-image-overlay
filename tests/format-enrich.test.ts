@@ -1,8 +1,9 @@
+// enrichFromBytes is a thin dispatcher — the underlying parsers are
+// covered by their own test files. We only verify the dispatch shape:
+// HEIC nclx → both keys, PNG cICP→iCCP fallback chain, unknown ext is a no-op.
+
 import { describe, it, expect } from 'vitest';
 import { enrichFromBytes } from '../src/webview/lib/format-enrich.js';
-
-// --- Helpers (mirrored from iso-bmff / png-chunks tests, kept local so
-// each test file stands alone) ---
 
 function box(type: string, payload: Uint8Array): Uint8Array {
   const out = new Uint8Array(8 + payload.length);
@@ -21,22 +22,15 @@ function cat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-function nclxColr(p: number, t: number, m: number, fr: boolean): Uint8Array {
-  const payload = new Uint8Array(11);
-  payload[0] = 'n'.charCodeAt(0); payload[1] = 'c'.charCodeAt(0);
-  payload[2] = 'l'.charCodeAt(0); payload[3] = 'x'.charCodeAt(0);
-  const dv = new DataView(payload.buffer);
-  dv.setUint16(4, p); dv.setUint16(6, t); dv.setUint16(8, m);
-  payload[10] = fr ? 0x80 : 0;
-  return box('colr', payload);
-}
-
-function makeIsoFile(colr: Uint8Array): Uint8Array {
-  const meta = box('meta', cat(new Uint8Array(4), box('iprp', box('ipco', colr))));
+function makeHeic(primaries: number, transfer: number, matrix: number, fullRange: boolean): Uint8Array {
+  const colr = new Uint8Array(11);
+  colr.set([0x6e, 0x63, 0x6c, 0x78]);
+  const dv = new DataView(colr.buffer);
+  dv.setUint16(4, primaries); dv.setUint16(6, transfer); dv.setUint16(8, matrix);
+  colr[10] = fullRange ? 0x80 : 0;
+  const meta = box('meta', cat(new Uint8Array(4), box('iprp', box('ipco', box('colr', colr)))));
   return cat(box('ftyp', new Uint8Array(8)), meta);
 }
-
-const PNG_SIG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
 function pngChunk(type: string, data: Uint8Array): Uint8Array {
   const out = new Uint8Array(8 + data.length + 4);
@@ -47,82 +41,38 @@ function pngChunk(type: string, data: Uint8Array): Uint8Array {
   return out;
 }
 
+const PNG_SIG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const IHDR = pngChunk('IHDR', new Uint8Array(13));
 const IEND = pngChunk('IEND', new Uint8Array(0));
 
-// --- Tests ---
+describe('enrichFromBytes', () => {
+  it('HEIC with HDR10 nclx produces both ProfileDescription and __hdrFormat', () => {
+    expect(enrichFromBytes(makeHeic(9, 16, 9, true), 'heic')).toEqual({
+      ProfileDescription: 'Rec.2020 PQ',
+      __hdrFormat: 'HDR10 (PQ)',
+    });
+  });
 
-describe('enrichFromBytes — HEIC/AVIF/HEIF', () => {
-  it('produces Display P3 ProfileDescription with no HDR for (12, 13, 1)', () => {
-    const file = makeIsoFile(nclxColr(12, 13, 1, false));
-    expect(enrichFromBytes(file, 'avif')).toEqual({
+  it('PNG cICP wins over iCCP when both present', () => {
+    const cicp = pngChunk('cICP', new Uint8Array([12, 13, 1, 0]));
+    const iccp = pngChunk('iCCP', new Uint8Array([0x73, 0x52, 0x47, 0x42, 0])); // "sRGB\0"
+    expect(enrichFromBytes(cat(PNG_SIG, IHDR, cicp, iccp, IEND), 'png')).toEqual({
       ProfileDescription: 'Display P3',
     });
   });
 
-  it('produces Rec.2020 PQ + HDR10 (PQ) for (9, 16, 9)', () => {
-    const file = makeIsoFile(nclxColr(9, 16, 9, true));
-    expect(enrichFromBytes(file, 'heic')).toEqual({
-      ProfileDescription: 'Rec.2020 PQ',
-      __hdrFormat: 'HDR10 (PQ)',
-    });
-  });
-
-  it('produces Rec.2020 HLG + HLG for (9, 18, 9)', () => {
-    const file = makeIsoFile(nclxColr(9, 18, 9, false));
-    expect(enrichFromBytes(file, 'heif')).toEqual({
-      ProfileDescription: 'Rec.2020 HLG',
-      __hdrFormat: 'HLG',
-    });
-  });
-
-  it('returns empty object for HEIC with no nclx', () => {
-    expect(enrichFromBytes(new Uint8Array(8), 'heic')).toEqual({});
-  });
-});
-
-describe('enrichFromBytes — PNG', () => {
-  it('reads cICP and prefers it over iCCP', () => {
-    const cicp = pngChunk('cICP', new Uint8Array([9, 16, 9, 1]));
-    // Throw an iCCP in too — cICP wins.
-    const iccpName = 'sRGB IEC61966-2.1';
-    const iccpData = new Uint8Array(iccpName.length + 1 + 1);
-    for (let i = 0; i < iccpName.length; i++) iccpData[i] = iccpName.charCodeAt(i);
-    const iccp = pngChunk('iCCP', iccpData);
-    const file = cat(PNG_SIG, IHDR, cicp, iccp, IEND);
-    expect(enrichFromBytes(file, 'png')).toEqual({
-      ProfileDescription: 'Rec.2020 PQ',
-      __hdrFormat: 'HDR10 (PQ)',
-    });
-  });
-
-  it('falls back to iCCP profile name when no cICP present', () => {
+  it('PNG falls back to iCCP profile name when no cICP', () => {
     const name = 'Display P3';
-    const data = new Uint8Array(name.length + 1 + 1);
+    const data = new Uint8Array(name.length + 1);
     for (let i = 0; i < name.length; i++) data[i] = name.charCodeAt(i);
-    const iccp = pngChunk('iCCP', data);
-    const file = cat(PNG_SIG, IHDR, iccp, IEND);
-    expect(enrichFromBytes(file, 'png')).toEqual({
+    expect(enrichFromBytes(cat(PNG_SIG, IHDR, pngChunk('iCCP', data), IEND), 'png')).toEqual({
       ProfileDescription: 'Display P3',
     });
   });
 
-  it('returns empty for PNG with neither cICP nor iCCP', () => {
-    const file = cat(PNG_SIG, IHDR, IEND);
-    expect(enrichFromBytes(file, 'png')).toEqual({});
-  });
-});
-
-describe('enrichFromBytes — unsupported extensions', () => {
-  it('returns empty for jpg/jpeg/etc', () => {
+  it('returns {} for unsupported extensions and case-insensitive matches', () => {
     expect(enrichFromBytes(new Uint8Array(64), 'jpg')).toEqual({});
-    expect(enrichFromBytes(new Uint8Array(64), 'webp')).toEqual({});
-    expect(enrichFromBytes(new Uint8Array(64), 'tiff')).toEqual({});
-  });
-
-  it('is case-insensitive on the extension', () => {
-    const file = makeIsoFile(nclxColr(12, 13, 1, false));
-    expect(enrichFromBytes(file, 'AVIF')).toEqual({
+    expect(enrichFromBytes(makeHeic(12, 13, 1, false), 'AVIF')).toEqual({
       ProfileDescription: 'Display P3',
     });
   });

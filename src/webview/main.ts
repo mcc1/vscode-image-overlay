@@ -393,7 +393,8 @@ function renderExpanded() {
     },
     {
       title: 'Image',
-      keys: ['Orientation', 'ColorSpace', 'BitDepth', 'ColorType', 'BitsPerSample',
+      keys: ['Orientation', 'ColorSpace', 'ProfileDescription', '__hdrFormat',
+             'BitDepth', 'ColorType', 'BitsPerSample',
              'XResolution', 'YResolution', 'ResolutionUnit', 'Compression'],
     },
     {
@@ -414,15 +415,20 @@ function renderExpanded() {
       const v = e[k];
       if (v == null || v === '') continue;
       let display = v instanceof Date ? v.toLocaleString() : String(v);
-      // hyperlink GPS coords in the expanded table too
       if ((k === 'latitude' || k === 'longitude') && gpsUrl) {
         display = `<a href="${escapeAttr(gpsUrl)}" class="gps-link">${escapeHtml(display)}</a>`;
       } else if (k === 'ColorSpace') {
+        // Skip the row when EXIF says Uncalibrated and we have a real
+        // ProfileDescription from the format-aware enrichment — showing
+        // both "Uncalibrated" and "Rec.2020 PQ" together just confuses.
+        const num = typeof v === 'number' ? v : Number(v);
+        if (num === 65535 && e.ProfileDescription) continue;
         display = escapeHtml(formatExifColorSpace(v));
       } else {
         display = escapeHtml(display);
       }
-      rows.push(`<tr><td>${escapeHtml(k)}</td><td>${display}</td></tr>`);
+      const label = k === '__hdrFormat' ? 'HDR' : k;
+      rows.push(`<tr><td>${escapeHtml(label)}</td><td>${display}</td></tr>`);
     }
     if (rows.length) {
       renderedSections.push(
@@ -509,22 +515,23 @@ async function loadExif(uri: string): Promise<void> {
   }
 }
 
-// Format-aware enrichment runs after exifr. exifr can't read the AVIF/HEIC
-// `nclx` colour box or the PNG `cICP` chunk, so on those formats EXIF
-// ColorSpace lies (`Uncalibrated`) and HDR detection misses HDR10 / HLG
-// entirely. We do a second pass on the raw bytes for HEIC/HEIF/AVIF/PNG,
-// fold the result into state.exif as `ProfileDescription` + `__hdrFormat`,
-// and let the existing render path surface them.
+// Second pass after exifr: read AVIF/HEIC nclx and PNG cICP/iCCP signals
+// that exifr can't surface, fold them into state.exif so describeColorSpace
+// and detectHdr pick them up unchanged. Asks for the head with a Range
+// header so a 100 MB photo doesn't allocate 100 MB just to find ~7 bytes;
+// the host may ignore Range, in which case we slice locally as a backstop.
+const ENRICH_HEAD_BYTES = 1_048_576;
+
 async function enrichExifFromFormat(uri: string, name: string, gen: number): Promise<void> {
   const ext = getExt(name).toLowerCase();
   if (!['heic', 'heif', 'avif', 'png'].includes(ext)) return;
   try {
-    const res = await fetch(uri);
-    if (!res.ok) return;
+    const res = await fetch(uri, { headers: { Range: `bytes=0-${ENRICH_HEAD_BYTES - 1}` } });
+    if (!res.ok || gen !== state.loadGen) return;
+    const full = new Uint8Array(await res.arrayBuffer());
     if (gen !== state.loadGen) return;
-    const buf = await res.arrayBuffer();
-    if (gen !== state.loadGen) return;
-    const enriched = enrichFromBytes(buf, ext);
+    const head = full.length > ENRICH_HEAD_BYTES ? full.subarray(0, ENRICH_HEAD_BYTES) : full;
+    const enriched = enrichFromBytes(head, ext);
     if (Object.keys(enriched).length === 0) return;
     state.exif = { ...(state.exif || {}), ...enriched };
   } catch (err) {
