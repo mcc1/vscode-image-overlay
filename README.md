@@ -67,8 +67,10 @@ shows metadata as small floating cards anchored in fixed corners.
 - **Auto-contrast.** Each corner samples its own background luminance to
   pick a light- or dark-friendly glass tint.
 - **Fully hideable.** Press <kbd>I</kbd> to toggle all overlays off.
-- **Zoom & pan.** Scroll to zoom, drag to pan, <kbd>0</kbd> or double-click
-  to reset.
+- **Zoom & pan.** Scroll to zoom (pivots on the cursor — the pixel under
+  your pointer stays put), drag to pan, <kbd>0</kbd> or double-click to
+  reset. Pointer capture means the pan keeps tracking even if you
+  release the mouse outside the VS Code window.
 
 ## Supported formats
 

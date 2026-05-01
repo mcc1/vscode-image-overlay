@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 — README catches up with 0.3.1
+
+Doc-only release. README now mentions the cursor-centered zoom and the
+pointer-capture pan that shipped in 0.3.1 — both were missed when 0.3.1
+went out.
+
 ## 0.3.1 — Stickier pan, cursor-centered zoom
 
 - **Fixed: image stuck following the cursor after releasing the mouse
