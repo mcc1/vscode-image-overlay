@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1 — Stickier pan, cursor-centered zoom
+
+- **Fixed: image stuck following the cursor after releasing the mouse
+  outside the webview / outside VS Code.** The drag handler used
+  `mousedown`+`mouseup` on the iframe `window`, which silently misses
+  the release event when it happens elsewhere. Switched to Pointer
+  Events with `setPointerCapture` so the stage keeps receiving move/up
+  no matter where the pointer ends up.
+- **Fixed: native drag-and-drop ghost flickering during pan.** The
+  browser was occasionally trying to start a "drag this image
+  elsewhere" gesture on top of our pan. `<img draggable="false">` and
+  `dragstart` preventDefault on the stage shut that down.
+- **Scroll-wheel zoom is now cursor-centered.** Zooming keeps the
+  image-space point under the pointer fixed, instead of growing /
+  shrinking toward the stage centre. Keyboard zoom (`+` / `-`) still
+  pivots on the stage centre — cursor pivot doesn't make sense there.
+
 ## 0.3.0 — Real wide-gamut / HDR detection
 
 The file card no longer relies on EXIF's `ColorSpace` tag (which on

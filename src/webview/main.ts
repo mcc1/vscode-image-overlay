@@ -1118,31 +1118,59 @@ img.addEventListener('error', () => {
   overlays.tl.classList.remove('empty');
 });
 
+// Cursor-centered zoom: keep the image-space point under the cursor fixed
+// across the zoom step. Without this the image just grows/shrinks toward
+// the stage centre, which feels disconnected when you're inspecting a
+// specific region.
 stage.addEventListener('wheel', (e) => {
   e.preventDefault();
   const delta = -Math.sign(e.deltaY) * 0.12;
-  state.zoom = Math.max(0.05, Math.min(32, state.zoom * (1 + delta)));
+  const oldZoom = state.zoom;
+  const newZoom = Math.max(0.05, Math.min(32, oldZoom * (1 + delta)));
+  if (newZoom === oldZoom) return;
+  const k = newZoom / oldZoom;
+  const rect = stage.getBoundingClientRect();
+  const cx = e.clientX - rect.left - rect.width / 2;
+  const cy = e.clientY - rect.top - rect.height / 2;
+  state.zoom = newZoom;
+  state.panX = state.panX * k + (1 - k) * cx;
+  state.panY = state.panY * k + (1 - k) * cy;
   applyTransform();
 }, { passive: false });
 
+// Drag-to-pan via Pointer Events. setPointerCapture means we keep getting
+// pointermove/pointerup even if the user releases outside the webview
+// iframe (or outside VS Code entirely) — without it the mouseup event
+// vanishes and `dragging` stays true, sticking the image to the cursor.
 let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
-stage.addEventListener('mousedown', (e) => {
-  if (e.button !== 0) return;
+let dragPointerId = -1;
+stage.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.pointerType === 'touch') return;
   state.dragging = true;
+  dragPointerId = e.pointerId;
+  stage.setPointerCapture(e.pointerId);
   dragStart = { x: e.clientX, y: e.clientY, panX: state.panX, panY: state.panY };
   stage.classList.add('dragging');
 });
-window.addEventListener('mousemove', (e) => {
-  if (!state.dragging) return;
+stage.addEventListener('pointermove', (e) => {
+  if (!state.dragging || e.pointerId !== dragPointerId) return;
   state.panX = dragStart.panX + (e.clientX - dragStart.x);
   state.panY = dragStart.panY + (e.clientY - dragStart.y);
   applyTransform();
 });
-window.addEventListener('mouseup', () => {
-  if (!state.dragging) return;
+function endDrag(e: PointerEvent) {
+  if (!state.dragging || e.pointerId !== dragPointerId) return;
   state.dragging = false;
+  dragPointerId = -1;
   stage.classList.remove('dragging');
-});
+}
+stage.addEventListener('pointerup', endDrag);
+stage.addEventListener('pointercancel', endDrag);
+
+// Block native HTML5 drag-and-drop so the browser doesn't take over with
+// a "drag this image elsewhere" ghost when the user is just trying to pan.
+img.draggable = false;
+stage.addEventListener('dragstart', (e) => e.preventDefault());
 
 stage.addEventListener('dblclick', () => {
   state.zoom = 1;
