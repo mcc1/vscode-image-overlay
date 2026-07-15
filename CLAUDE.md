@@ -12,11 +12,17 @@ competitors compress the image; corner overlays don't.
 ## Architecture
 - `src/extension.ts` — activation, registers the custom editor and commands.
 - `src/provider.ts` — `CustomReadonlyEditorProvider`. Builds the webview HTML,
-  sets CSP, wires `localResourceRoots`, enumerates sibling images in the
-  current folder (sorted per settings), and holds **session-scoped UI flags**
+  sets CSP, wires `localResourceRoots`, and holds **session-scoped UI flags**
   (e.g. `histogramOn`) that need to survive a single-webview lifetime — the
   webview pushes back via `postMessage({ type: 'histogramToggle', value })`
   so the next image opened from Explorer inherits the state.
+  Sibling enumeration is **off the first-paint critical path**: the HTML is
+  assigned right after a single stat of the opened file (with `siblings: []`),
+  the folder is then enumerated with parallel stats, and the sorted list is
+  delivered via `{ type: 'siblings', siblings, currentIndex }` once the
+  webview has posted `{ type: 'ready' }` (handshake so the message can't be
+  dropped before the listener exists). Don't reintroduce awaits between the
+  config/stat block and the `webview.html` assignment.
 - `src/webview/main.ts` — runs in the webview. Responsibilities:
   - Load the image via `<img>`.
   - Parse EXIF/IPTC/XMP client-side with `exifr` (bundled into `dist/viewer.js`).
@@ -25,6 +31,13 @@ competitors compress the image; corner overlays don't.
   - Sample corner luminance from a downsampled canvas to pick light/dark glass.
   - Browse siblings (`←`/`→`), slideshow (`Space` / `[` / `]`), zoom & pan,
     and a Web-Worker-based RGBA histogram (`H`).
+  - Prefetch the prev/next sibling (`new Image()` + `decode()`, ≤2 cached)
+    after each image settles, so browsing hits Chromium's memory/decoded
+    caches. High-frequency input DOM work (wheel zoom, drag pan, corner
+    proximity) is rAF-coalesced; `setOverlay` skips writes when the HTML
+    is unchanged. EXIF loads are generation-guarded: `loadExif` /
+    `enrichExifFromFormat` return objects and `onImageReady` commits them
+    only if `state.loadGen` still matches (fast ←/→ can't cross-paint EXIF).
   - Bounding-box-aware cursor-near fade — measures the rect of each overlay
     so the expanded EXIF panel's larger footprint is handled correctly.
 - `media/viewer.css` — glass-style overlay styling; uses VS Code theme variables
@@ -222,6 +235,34 @@ Roadmap is open. See backlog below for candidate items.
 
 ### Backlog (no version pinned)
 
+**Bugs / cleanups (2026-07-16 full review — verified findings, not yet fixed)**
+- [ ] `format.ts` Flash chip: `includes('no flash')` never matches exifr's
+      real translated strings ("Flash did not fire", "...compulsory flash
+      mode", …) → spurious flash line on every non-flash photo. The fixture
+      in `tests/format.test.ts` uses `Flash: 'No flash'`, a shape real data
+      never produces — fix code + fixture together.
+- [ ] `describeColorMode`: real exifr gives TIFF `BitsPerSample` as an
+      object `{0:8,1:8,2:8}`, not a scalar → bit depth never shows for TIFF
+      (`typeof === 'number'` filters it out).
+- [ ] Windows: `createFileSystemWatcher(fsPath string)` uses a backslash
+      path as a glob → never matches, `fileUpdate` live-refresh is dead on
+      Windows. Use `new vscode.RelativePattern(dirUri, basename)`.
+- [ ] `imageOverlay.autoContrast` setting is injected into ctx but never
+      read by main.ts — wire it (skip sampling, fixed glass) or drop it.
+- [ ] `iso-bmff.ts` `walkBoxes`: box size 0 (extends-to-EOF) or 1 (64-bit
+      size) aborts the whole walk instead of handling/skipping → HDR
+      detection silently lost when e.g. a size-0 `mdat` precedes `meta`.
+      Add size-0/1 (and oversized-length) cases to the parser tests.
+- [ ] Slideshow tick is scheduled at swap start, not image-ready — an
+      interval shorter than decode time keeps skipping past images.
+- [ ] `swapTo` doesn't reset `state.hasAlpha` → previous image's RGB/RGBA
+      briefly shows in the file card during a swap.
+- [ ] GPS map card DOM (incl. tile `<img>`s) is rebuilt on every `render()`
+      (I/E toggles, swaps) — cache the rendered map HTML per image.
+- [ ] `analyzeCorners` + `detectAlpha` each `drawImage` separately before
+      the first overlay render — merge into one downscaled sample.
+- [ ] `getNonce()` uses `Math.random` — switch to `crypto.getRandomValues`.
+
 **Polish**
 - [ ] Marketplace listing screenshots / a short animated GIF.
       User has to capture them; tooling pointer is ScreenToGif on Win.
@@ -239,6 +280,14 @@ Roadmap is open. See backlog below for candidate items.
 - [ ] Marketplace auto-publish via `vsce publish` in the release
       workflow. **Blocked:** Azure DevOps PAT issuance fails with
       `AADSTS5000225` on the current MS account. See "Release process".
+- [ ] Perf 方案 B — TIFF decode into a worker (mirror heic-worker's shape),
+      keep the HEIC worker/WASM instance alive between decodes (today it
+      re-instantiates per image), and stop emitting the doomed inline
+      `<img src>` for TIFF/HEIC (whole file read twice).
+- [ ] Perf 方案 C — present decoded TIFF/HEIC on a canvas to skip the
+      RGBA → PNG encode → `<img>` re-decode round-trip. Touches every
+      consumer that reads `img` (corners, alpha, histogram); only worth it
+      for heavy large-TIFF/HEIC use.
 
 **Likely never**
 - [ ] HDR-aware histogram. Canvas2D readback is 8-bit sRGB regardless

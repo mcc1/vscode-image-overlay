@@ -1,5 +1,7 @@
 .vscode/**
 .vscode-test/**
+.remember/**
+.claude/**
 src/**
 scripts/**
 **/*.ts

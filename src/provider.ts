@@ -76,22 +76,10 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
 
     const stat = await vscode.workspace.fs.stat(document.uri);
 
-    // Enumerate sibling images in the same folder. Sort once on host so the
-    // webview can navigate purely by index. ~1000 entries × ~200 bytes each
-    // is well under the postMessage limit; we send the whole list up front
-    // rather than round-tripping per nav for snap responsiveness during
-    // slideshow.
-    const siblings = await this.enumerateSiblings(
-      webviewPanel.webview,
-      document.uri,
-      sortBy,
-      sortOrder,
-    );
-    const currentIndex = Math.max(
-      0,
-      siblings.findIndex((s) => s.fsPath === document.uri.fsPath),
-    );
-
+    // Paint immediately: assign the webview HTML now, before sibling
+    // enumeration even starts. Folders with thousands of images used to
+    // block first paint on a sequential per-file stat loop; siblings now
+    // arrive afterwards over postMessage (see below).
     webviewPanel.webview.html = this.buildHtml(
       webviewPanel.webview,
       document.uri,
@@ -103,21 +91,74 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
         autoContrast,
         showHint,
         gpsMapProvider,
-        siblings,
-        currentIndex,
+        siblings: [],
+        currentIndex: 0,
         browseLoop,
         slideshowIntervalMs,
         histogramOn: this.histogramOn,
       }
     );
 
+    // Enumerate sibling images in the background — sort once on host so the
+    // webview can navigate purely by index. ~1000 entries × ~200 bytes each
+    // is well under the postMessage limit; we send the whole list up front
+    // rather than round-tripping per nav for snap responsiveness during
+    // slideshow. Delivered exactly once, after both enumeration and the
+    // webview's 'ready' handshake have completed — whichever lands last
+    // triggers the post.
+    let panelDisposed = false;
+    let webviewReady = false;
+    let siblingsSent = false;
+    let siblings: SiblingItem[] | undefined;
+
+    const postSiblingsIfReady = () => {
+      if (!webviewReady || panelDisposed || siblingsSent) return;
+      const result = siblings;
+      if (result === undefined) return;
+      siblingsSent = true;
+      const currentIndex = Math.max(
+        0,
+        result.findIndex((s) => s.fsPath === document.uri.fsPath),
+      );
+      try {
+        webviewPanel.webview.postMessage({
+          type: 'siblings',
+          siblings: result.map((s) => ({
+            uri: s.uri,
+            name: s.name,
+            size: s.size,
+            mtime: s.mtime,
+            ctime: s.ctime,
+          })),
+          currentIndex,
+        });
+      } catch {
+        /* panel disposed between the check above and now */
+      }
+    };
+
+    this.enumerateSiblings(webviewPanel.webview, document.uri, sortBy, sortOrder)
+      .then((result) => {
+        siblings = result;
+        postSiblingsIfReady();
+      })
+      .catch((err) => {
+        console.error('imageOverlay: sibling enumeration failed', err);
+        siblings = [];
+        postSiblingsIfReady();
+      });
+
     // Sync session-scoped UI toggles from webview back into the host so
-    // newly-opened images inherit the current state.
+    // newly-opened images inherit the current state; also catches the
+    // webview's boot handshake so siblings can be posted (see above).
     webviewPanel.webview.onDidReceiveMessage((msg: unknown) => {
       if (!msg || typeof msg !== 'object') return;
       const m = msg as { type?: string; value?: unknown };
       if (m.type === 'histogramToggle') {
         this.histogramOn = !!m.value;
+      } else if (m.type === 'ready') {
+        webviewReady = true;
+        postSiblingsIfReady();
       }
     });
 
@@ -130,6 +171,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       setActive(e.webviewPanel.active ? e.webviewPanel : this.activePanel === e.webviewPanel ? undefined : this.activePanel);
     });
     webviewPanel.onDidDispose(() => {
+      panelDisposed = true;
       if (this.activePanel === webviewPanel) setActive(undefined);
     });
 
@@ -167,26 +209,29 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     } catch {
       return [];
     }
-    const items: SiblingItem[] = [];
-    for (const [name, type] of entries) {
-      if (type !== vscode.FileType.File) continue;
-      const ext = path.extname(name).toLowerCase();
-      if (!SUPPORTED_EXTS.has(ext)) continue;
+    const candidates = entries.filter(([name, type]) => {
+      if (type !== vscode.FileType.File) return false;
+      return SUPPORTED_EXTS.has(path.extname(name).toLowerCase());
+    });
+    // Stat calls fire in parallel — a sequential await-per-file loop here
+    // was the first-paint bottleneck in folders with thousands of images.
+    const stated = await Promise.all(candidates.map(async ([name]): Promise<SiblingItem | undefined> => {
       const fullPath = path.join(dir, name);
       try {
         const s = await vscode.workspace.fs.stat(vscode.Uri.file(fullPath));
-        items.push({
+        return {
           fsPath: fullPath,
           uri: webview.asWebviewUri(vscode.Uri.file(fullPath)).toString(),
           name,
           size: s.size,
           mtime: s.mtime,
           ctime: s.ctime,
-        });
+        };
       } catch {
-        /* skip unreadable */
+        return undefined; /* skip unreadable */
       }
-    }
+    }));
+    const items = stated.filter((item): item is SiblingItem => item !== undefined);
     const cmp = (a: SiblingItem, b: SiblingItem): number => {
       let r = 0;
       if (sortBy === 'mtime') r = a.mtime - b.mtime;
@@ -277,7 +322,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
   <div id="overlay-br" class="overlay corner br"></div>
   <div id="histogram"><canvas></canvas><div class="hist-status">computing…</div></div>
   <div id="hint" class="hint"><kbd>I</kbd> toggle · <kbd>E</kbd> expand · <kbd>H</kbd> histogram · <kbd>0</kbd> reset · <kbd>←</kbd> <kbd>→</kbd> browse · <kbd>Space</kbd> slideshow</div>
-  <script nonce="${nonce}">window.__IMG_CTX__ = ${JSON.stringify(injectedCtx)};</script>
+  <script nonce="${nonce}">window.__IMG_CTX__ = ${JSON.stringify(injectedCtx).replace(/</g, '\\u003c')};</script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

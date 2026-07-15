@@ -44,6 +44,12 @@ const ctx = (window as unknown as { __IMG_CTX__: InjectedCtx }).__IMG_CTX__;
 // histogram toggle in sync across separate webviews of the same provider).
 declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 const vscodeApi = acquireVsCodeApi();
+// Announce we're live so the host can deliver the sibling list. The provider
+// no longer inlines siblings into the HTML — it enumerates the folder
+// asynchronously and posts { type: 'siblings', ... } back (at most once).
+// Sent here, before any image wiring, so the host never races the webview.
+// ctx therefore arrives with siblings: [] and currentIndex: 0.
+vscodeApi.postMessage({ type: 'ready' });
 
 const img = document.getElementById('img') as HTMLImageElement;
 // Zoom/pan transforms live on the wrapper, not on the <img> itself —
@@ -285,10 +291,13 @@ function buildCaptureHtml(): string {
   const lines: string[] = [];
   if (camera) lines.push(`<div class="title">${escapeHtml(camera)}</div>`);
   if (lens) lines.push(`<div class="meta dim">${escapeHtml(String(lens))}</div>`);
-  if (shot) lines.push(`<div class="meta">${shot}</div>`);
+  // shot/describeCaptureExtras assemble EXIF numeric fields, but exifr
+  // doesn't guarantee their runtime type against a crafted file — escape
+  // before they hit innerHTML.
+  if (shot) lines.push(`<div class="meta">${escapeHtml(shot)}</div>`);
 
   for (const line of describeCaptureExtras(e)) {
-    lines.push(`<div class="meta dim">${line}</div>`);
+    lines.push(`<div class="meta dim">${escapeHtml(line)}</div>`);
   }
 
   if (taken) lines.push(`<div class="meta dim">${escapeHtml(formatMaybeDate(taken))}</div>`);
@@ -321,13 +330,23 @@ function buildZoomHtml(): string {
   return `<div class="card-section"><div class="meta big zoom-pct">${pct}%</div></div>`;
 }
 
+// Cache of the last HTML committed per corner. render() rebuilds all four
+// corner strings on every call (zoom%, EXIF text, etc.), but most of the
+// time the string is identical to what's already in the DOM — e.g. panning
+// only changes BL/TR content, not BR's zoom% — so skip the innerHTML write
+// when nothing actually changed. Class toggles stay unconditional since
+// they're cheap and must track the current call either way.
+const overlayHtmlCache: Record<CornerKey, string> = { tl: '', tr: '', bl: '', br: '' };
+
 function setOverlay(key: CornerKey, html: string) {
   const node = overlays[key];
-  if (html) {
+  if (overlayHtmlCache[key] !== html) {
+    overlayHtmlCache[key] = html;
     node.innerHTML = html;
+  }
+  if (html) {
     node.classList.remove('empty');
   } else {
-    node.innerHTML = '';
     node.classList.add('empty');
   }
 }
@@ -444,10 +463,14 @@ function renderExpanded() {
     <div class="meta dim">${getExt(state.filename)} · ${fmtSize(state.fileSize)} · ${state.natural.w}×${state.natural.h}${colorMode ? ' · ' + escapeHtml(colorMode) : ''}</div>
   `;
 
-  overlays[target].innerHTML = header + (renderedSections.length
+  const html = header + (renderedSections.length
     ? renderedSections.join('')
     : `<div class="meta dim" style="margin-top:8px">no EXIF data</div>`);
-  overlays[target].classList.remove('empty');
+  // Route through setOverlay (instead of writing innerHTML directly) so
+  // overlayHtmlCache stays coherent — otherwise toggling back to the
+  // non-expanded capture card could see a stale cached string for 'tl'
+  // and skip a write it actually needs to make.
+  setOverlay(target, html);
 }
 
 async function analyzeCorners(): Promise<void> {
@@ -486,7 +509,7 @@ async function analyzeCorners(): Promise<void> {
   }
 }
 
-async function loadExif(uri: string): Promise<void> {
+async function loadExif(uri: string): Promise<Record<string, unknown> | null> {
   // Hand the URI directly to exifr instead of pre-fetching the whole file
   // into an ArrayBuffer. exifr's default chunked mode (true for URL input
   // in browser) issues Range requests and only pulls the few segments it
@@ -494,8 +517,12 @@ async function loadExif(uri: string): Promise<void> {
   // on the main thread. Falls back to a full fetch automatically if the
   // underlying transport doesn't honor Range, so no behavioral regression
   // on hosts that don't.
+  //
+  // Returns the parsed record (or {} when exifr finds nothing) on success and
+  // null on failure — the caller commits it to state.exif behind a gen check,
+  // so a load superseded by a fast navigate never writes stale data.
   try {
-    state.exif = await exifr.parse(uri, {
+    return await exifr.parse(uri, {
       tiff: true,
       xmp: true,
       iptc: true,
@@ -511,31 +538,60 @@ async function loadExif(uri: string): Promise<void> {
     }) || {};
   } catch (err) {
     console.warn('[image-overlay] exif parse failed', err);
-    state.exif = null;
+    return null;
   }
 }
 
 // Second pass after exifr: read AVIF/HEIC nclx and PNG cICP/iCCP signals
-// that exifr can't surface, fold them into state.exif so describeColorSpace
-// and detectHdr pick them up unchanged. Asks for the head with a Range
-// header so a 100 MB photo doesn't allocate 100 MB just to find ~7 bytes;
-// the host may ignore Range, in which case we slice locally as a backstop.
-const ENRICH_HEAD_BYTES = 1_048_576;
+// that exifr can't surface. Returns keys to fold onto state.exif so
+// describeColorSpace and detectHdr pick them up unchanged (or {} when there's
+// nothing to add). The caller merges the result behind a gen check, so this
+// no longer takes/tracks a generation itself.
+//
+// Per-format head budget: PNG cICP/iCCP chunks live before IDAT near the very
+// start (256 KB is generous), while ISOBMFF meta boxes can sit deeper, so
+// HEIC/AVIF keep a 1 MB window.
+const ENRICH_HEAD_PNG = 262_144;
+const ENRICH_HEAD_ISOBMFF = 1_048_576;
 
-async function enrichExifFromFormat(uri: string, name: string, gen: number): Promise<void> {
+async function enrichExifFromFormat(uri: string, name: string): Promise<Record<string, unknown>> {
   const ext = getExt(name).toLowerCase();
-  if (!['heic', 'heif', 'avif', 'png'].includes(ext)) return;
+  if (!['heic', 'heif', 'avif', 'png'].includes(ext)) return {};
+  const limit = ext === 'png' ? ENRICH_HEAD_PNG : ENRICH_HEAD_ISOBMFF;
   try {
-    const res = await fetch(uri, { headers: { Range: `bytes=0-${ENRICH_HEAD_BYTES - 1}` } });
-    if (!res.ok || gen !== state.loadGen) return;
-    const full = new Uint8Array(await res.arrayBuffer());
-    if (gen !== state.loadGen) return;
-    const head = full.length > ENRICH_HEAD_BYTES ? full.subarray(0, ENRICH_HEAD_BYTES) : full;
-    const enriched = enrichFromBytes(head, ext);
-    if (Object.keys(enriched).length === 0) return;
-    state.exif = { ...(state.exif || {}), ...enriched };
+    // Ask for just the head with a Range header. VS Code's webview service
+    // worker likely ignores Range, though — and then res.arrayBuffer() would
+    // allocate the WHOLE file to read ~7 bytes. So when the body is a
+    // readable stream, pull chunks only until we have `limit` bytes and
+    // cancel the rest; fall back to arrayBuffer + slice only when it isn't.
+    const res = await fetch(uri, { headers: { Range: `bytes=0-${limit - 1}` } });
+    if (!res.ok) return {};
+    let head: Uint8Array;
+    if (res.body) {
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          received += value.length;
+          if (received >= limit) { await reader.cancel(); break; }
+        }
+      }
+      const merged = new Uint8Array(received);
+      let offset = 0;
+      for (const c of chunks) { merged.set(c, offset); offset += c.length; }
+      head = merged.length > limit ? merged.subarray(0, limit) : merged;
+    } else {
+      const full = new Uint8Array(await res.arrayBuffer());
+      head = full.length > limit ? full.subarray(0, limit) : full;
+    }
+    return enrichFromBytes(head, ext);
   } catch (err) {
     console.warn('[image-overlay] format enrichment failed', err);
+    return {};
   }
 }
 
@@ -791,6 +847,13 @@ function loadImageInto(uri: string, name: string): void {
 }
 
 async function onImageReady(): Promise<void> {
+  // Snapshot the generation and file identity up front. state.currentUri /
+  // state.filename can be reassigned by a navigate or fileUpdate that lands
+  // while we're mid-await, so we parse the file this call fired for and drop
+  // the whole result if a newer load has since bumped loadGen.
+  const myGen = state.loadGen;
+  const uri = state.currentUri;
+  const name = state.filename;
   state.natural.w = img.naturalWidth;
   state.natural.h = img.naturalHeight;
   // Now that we know the image's natural dimensions, switch from CSS
@@ -800,15 +863,34 @@ async function onImageReady(): Promise<void> {
   await analyzeCorners();
   detectAlpha();
   render();
-  const myGen = state.loadGen;
-  await loadExif(state.currentUri);
-  await enrichExifFromFormat(state.currentUri, state.filename, myGen);
+  // EXIF parse and format enrichment are independent reads of the same file,
+  // so run them concurrently. Both RETURN their data now (rather than mutating
+  // state.exif), which lets a superseded load be discarded wholesale by one
+  // gen check before anything is committed.
+  const [exif, extra] = await Promise.all([
+    loadExif(uri),
+    enrichExifFromFormat(uri, name),
+  ]);
+  if (myGen !== state.loadGen) return;   // a newer navigate won — drop this
+  // Merge preserves the old sequential outcome: enrichment (when non-empty)
+  // folds over the exif result; an exif failure with nothing to add stays null.
+  const extraKeys = Object.keys(extra).length;
+  if (exif === null && extraKeys === 0) {
+    state.exif = null;
+  } else if (extraKeys > 0) {
+    state.exif = { ...(exif || {}), ...extra };
+  } else {
+    state.exif = exif;
+  }
   render();
   // If the histogram is currently enabled, re-scan for the new image.
   // Discards any in-flight scan via the generation token.
   if (histState.on) {
     void refreshHistogram();
   }
+  // Image is settled and the gen is still current (guarded above) — warm the
+  // immediate neighbors so ←/→ and slideshow swaps show pixels instantly.
+  schedulePrefetch();
 }
 
 // --- Histogram (full-pixel scan, opt-in via H) ---
@@ -1118,6 +1200,41 @@ img.addEventListener('error', () => {
   overlays.tl.classList.remove('empty');
 });
 
+// --- rAF-coalesced DOM work for high-frequency input ---
+// Wheel zoom, drag-pan and cursor-proximity handlers below keep doing their
+// math / state updates synchronously per event (cursor-centered zoom always
+// reads the latest state; panX/panY track every pointermove) — only the
+// resulting DOM work is deferred to run at most once per frame:
+// applyTransform() (style writes) then updateCornerProximity() (4x
+// getBoundingClientRect reads). Writes before reads means a frame with both
+// pan and cursor movement forces layout once, not once per event. Mirrors
+// the rAF-id-guard style of the window resize handler above.
+let inputRafId: number | null = null;
+let transformPending = false;
+let proximityPending = false;
+
+function flushInputFrame() {
+  inputRafId = null;
+  if (transformPending) {
+    transformPending = false;
+    applyTransform();
+  }
+  if (proximityPending) {
+    proximityPending = false;
+    updateCornerProximity(lastCursor.x, lastCursor.y);
+  }
+}
+
+function scheduleApplyTransform() {
+  transformPending = true;
+  if (inputRafId == null) inputRafId = requestAnimationFrame(flushInputFrame);
+}
+
+function scheduleProximityUpdate() {
+  proximityPending = true;
+  if (inputRafId == null) inputRafId = requestAnimationFrame(flushInputFrame);
+}
+
 // Cursor-centered zoom: keep the image-space point under the cursor fixed
 // across the zoom step. Without this the image just grows/shrinks toward
 // the stage centre, which feels disconnected when you're inspecting a
@@ -1135,7 +1252,7 @@ stage.addEventListener('wheel', (e) => {
   state.zoom = newZoom;
   state.panX = state.panX * k + (1 - k) * cx;
   state.panY = state.panY * k + (1 - k) * cy;
-  applyTransform();
+  scheduleApplyTransform();
 }, { passive: false });
 
 // Drag-to-pan via Pointer Events. setPointerCapture means we keep getting
@@ -1156,7 +1273,7 @@ stage.addEventListener('pointermove', (e) => {
   if (!state.dragging || e.pointerId !== dragPointerId) return;
   state.panX = dragStart.panX + (e.clientX - dragStart.x);
   state.panY = dragStart.panY + (e.clientY - dragStart.y);
-  applyTransform();
+  scheduleApplyTransform();
 });
 function endDrag(e: PointerEvent) {
   if (!state.dragging || e.pointerId !== dragPointerId) return;
@@ -1213,6 +1330,47 @@ window.addEventListener('keydown', (e) => {
     adjustSlideshowSpeed(0.5); // shorter interval = faster
   }
 });
+
+// --- Neighbor prefetch ---
+// Warm the previous/next sibling into the browser image cache (and pre-decode
+// them) so ←/→ and slideshow swaps paint instantly instead of waiting on a
+// cold fetch+decode. Keyed by webview URI. fileUpdate cache-busted URIs
+// (…?v=N) never land here: they only ever apply to the *current* image, while
+// neighbors are always read from ctx.siblings, which holds the plain URIs.
+const prefetchCache = new Map<string, HTMLImageElement>();
+
+function schedulePrefetch(): void {
+  if (ctx.siblings.length <= 1) return;
+  const n = ctx.siblings.length;
+  const cur = state.currentIndex;
+  const wanted: string[] = [];
+  for (const dir of [-1, 1] as const) {
+    let idx = cur + dir;
+    if (idx < 0) idx = ctx.browseLoop ? n - 1 : -1;
+    else if (idx >= n) idx = ctx.browseLoop ? 0 : -1;
+    if (idx < 0 || idx === cur) continue;   // out of range (no loop) or wrapped onto self
+    const sib = ctx.siblings[idx];
+    if (!sib) continue;
+    // TIFF/HEIC don't render through <img> — a plain Image() can't warm them
+    // (they need the decode worker), so skip rather than cache a broken load.
+    if (isTiffName(sib.name) || isHeicName(sib.name)) continue;
+    wanted.push(sib.uri);
+    if (!prefetchCache.has(sib.uri)) {
+      const im = new Image();
+      im.decoding = 'async';
+      im.src = sib.uri;
+      // Pre-decode off the main thread; ignore failures (broken/aborted file).
+      im.decode?.().catch(() => {});
+      prefetchCache.set(sib.uri, im);
+    }
+  }
+  // Evict entries that are no longer an immediate neighbor. Plain delete is
+  // enough — these are webview-resource URIs, not blob: URLs, so there's no
+  // object URL to revoke.
+  for (const key of prefetchCache.keys()) {
+    if (!wanted.includes(key)) prefetchCache.delete(key);
+  }
+}
 
 // --- Browse / slideshow ---
 
@@ -1320,6 +1478,19 @@ window.addEventListener('message', (ev) => {
     state.currentUri = bust;
     state.exif = null;
     loadImageInto(bust, state.filename);
+  } else if (msg.type === 'siblings') {
+    // The host enumerates the folder off the render path and delivers the
+    // sorted/filtered sibling list here, at most once. Update state.currentIndex
+    // and ctx.currentIndex together: navigation is impossible while ctx.siblings
+    // is empty, so they can't diverge before this point, and moving both in
+    // lockstep keeps the fileUpdate staleness check
+    // (state.currentIndex !== ctx.currentIndex) valid — it only ever becomes
+    // true once the user actually navigates away, exactly as before.
+    ctx.siblings = msg.siblings;
+    ctx.currentIndex = msg.currentIndex;
+    state.currentIndex = msg.currentIndex;
+    render();             // the "N / M" position counter now has data to show
+    schedulePrefetch();   // and the immediate neighbors can start warming
   }
 });
 
@@ -1344,7 +1515,7 @@ window.addEventListener('mousemove', (e) => {
   markActive();
   lastCursor.x = e.clientX;
   lastCursor.y = e.clientY;
-  updateCornerProximity(e.clientX, e.clientY);
+  scheduleProximityUpdate();
 });
 window.addEventListener('keydown', markActive);
 window.addEventListener('wheel', markActive, { passive: true });
