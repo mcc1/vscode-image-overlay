@@ -1,9 +1,10 @@
 name: Release
 
-# Trigger: pushing a tag like `v0.1.2` builds the vsix and creates a
-# GitHub release with it attached. Marketplace upload is still manual
-# (drag the vsix into https://marketplace.visualstudio.com/manage/...)
-# because vsce publish needs an Azure DevOps PAT we don't have.
+# Trigger: pushing a tag like `v0.1.2` builds the vsix, creates a GitHub
+# release with it attached, and publishes the same vsix to the VS Code
+# Marketplace. Publishing needs the VSCE_PAT repo secret — an Azure DevOps
+# PAT (Marketplace→Manage scope, "All accessible organizations"); when the
+# secret is absent the publish step skips cleanly and upload stays manual.
 on:
   push:
     tags:
@@ -97,3 +98,28 @@ jobs:
           body_path: release-notes.md
           files: ${{ steps.vsix.outputs.path }}
           fail_on_unmatched_files: true
+
+      - name: Publish to Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "::notice::VSCE_PAT secret not set — skipping Marketplace publish (upload the vsix manually)."
+            exit 0
+          fi
+          # Fail fast on a dead/expired PAT before touching anything.
+          npx vsce verify-pat mcc
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          # Idempotency guard for workflow_dispatch re-runs: publishing a
+          # version that's already live would fail the run after the GitHub
+          # release step already succeeded. `vsce show` is unauthenticated;
+          # if it can't be read, fall through and let publish speak.
+          LIVE=$(npx vsce show mcc.image-overlay-preview --json 2>/dev/null \
+                 | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).versions[0].version" \
+                 || echo "unknown")
+          if [ "$LIVE" = "$PKG_VERSION" ]; then
+            echo "::notice::Version $PKG_VERSION is already live on the Marketplace — skipping."
+            exit 0
+          fi
+          npx vsce publish --packagePath "${{ steps.vsix.outputs.path }}"
+          echo "Published $PKG_VERSION to the Marketplace."

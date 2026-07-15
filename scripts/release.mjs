@@ -10,15 +10,15 @@
 //   2. git push --follow-tags       (kicks off the Release workflow on CI)
 //   3. Polls until the matching CI run appears, then watches it to completion
 //   4. Downloads the built vsix from the GitHub release into ./dist-release/
-//   5. Opens the marketplace publisher dashboard in the default browser so
-//      the user can drag the vsix in (the only step we can't automate
-//      because we don't have an Azure DevOps PAT).
+//   5. Marketplace publish happens IN CI (VSCE_PAT repo secret) — the
+//      download here is just a local archive copy and the manual-upload
+//      fallback for when that secret is missing or expired.
 //
 // Designed to fail loudly: any non-zero exit aborts the chain. Re-running
 // after a partial failure is safe — `npm version` refuses if the tag
 // already exists, `gh release download --clobber` is idempotent.
 
-import { execSync, spawnSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import { readFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -44,18 +44,6 @@ function runCapture(cmd) {
 
 function pkgVersion() {
   return JSON.parse(readFileSync('./package.json', 'utf8')).version;
-}
-
-function openInBrowser(url) {
-  // process.platform → win32 / darwin / linux (and others)
-  const cmd =
-    process.platform === 'win32'  ? ['cmd', ['/c', 'start', '', url]] :
-    process.platform === 'darwin' ? ['open', [url]] :
-                                     ['xdg-open', [url]];
-  const r = spawnSync(cmd[0], cmd[1], { stdio: 'ignore' });
-  if (r.status !== 0) {
-    console.warn(`(could not open browser automatically — open manually: ${url})`);
-  }
 }
 
 async function findCiRunForTag(tag) {
@@ -127,11 +115,9 @@ const target = downloaded.includes(expected) ? expected : downloaded[0];
 console.log(`✓ ${downloaded.length} file(s) in ./${RELEASE_DIR}/:`);
 for (const f of downloaded) console.log(`   ${f}`);
 
-step('Opening marketplace publisher dashboard…');
-openInBrowser(PUBLISHER_URL);
-
 console.log(`
-Done. Drag ./${RELEASE_DIR}/${target || '*.vsix'} into the
-"Update" dialog at:
-  ${PUBLISHER_URL}
+Done. CI published this version to the Marketplace (see the
+"Publish to Marketplace" step in the workflow run). Local copy:
+  ./${RELEASE_DIR}/${target || '*.vsix'}
+Manual fallback if that step was skipped: ${PUBLISHER_URL}
 `);

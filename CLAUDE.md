@@ -108,14 +108,21 @@ resolve. Pieces that needed explicit allowance:
 Don't loosen CSP further without a reason.
 
 ## Release process
-**Marketplace (`vsce publish`) is NOT automated** — the publisher account
-sits on a tenant whose Azure DevOps PAT issuance was blocked
-(`AADSTS5000225`, "tenant blocked due to inactivity"). All publishes go
-through the manual web upload at
+**Fully automated since 0.3.3** — the Release workflow publishes the vsix
+to the Marketplace via the `VSCE_PAT` repo secret (Azure DevOps PAT,
+scope Marketplace→Manage, org "All accessible organizations"; the
+`AADSTS5000225` tenant block that used to force manual uploads was
+resolved 2026-07). If the secret is missing the publish step skips
+cleanly and the fallback is the old manual upload at
 `https://marketplace.visualstudio.com/manage/publishers/mcc`.
 
-**GitHub side IS automated** via `.github/workflows/release.yml`. There's
-a one-shot helper that drives the whole flow end-to-end:
+**PAT rotation:** the PAT expires (max 1 year). When the CI "Publish to
+Marketplace" step starts failing auth, mint a new PAT (same account,
+same scope) and update the `VSCE_PAT` secret under repo Settings →
+Secrets and variables → Actions.
+
+`.github/workflows/release.yml` drives everything. There's a one-shot
+helper that runs the whole flow end-to-end:
 
 ```bash
 # 0. Edit CHANGELOG.md and add a "## 0.1.2 — title" section. The workflow
@@ -134,8 +141,8 @@ npm run release -- minor   # or minor / major
 4. `gh release download <tag> --pattern "*.vsix" -D dist-release/` — pulls
    the freshly-built vsix back to the local machine (CI runs on Ubuntu,
    so the artifact has to come back over the wire).
-5. Opens the marketplace publisher dashboard in the default browser; the
-   user drags the vsix in to push live.
+5. Prints the Marketplace status — the publish itself already happened
+   in CI; the downloaded vsix is a local archive copy / manual fallback.
 
 If you'd rather drive each step manually:
 
@@ -153,17 +160,18 @@ Pushing the tag fires the `Release` workflow:
 3. Slices `CHANGELOG.md` between `## <ver>` and the next `## ` heading.
 4. Creates / updates the GitHub release with the vsix attached and the
    sliced section as release notes.
+5. Publishes the same vsix to the Marketplace (`vsce publish
+   --packagePath`). Skips cleanly when `VSCE_PAT` is absent, and skips
+   when that exact version is already live — so `workflow_dispatch`
+   re-runs stay idempotent.
 
 `workflow_dispatch` is also wired up so a release can be re-built against
 an existing tag without retagging — useful when the workflow itself needs
 fixing or the vsix needs replacing.
 
-**After the workflow finishes**, grab the vsix from the GitHub release and
-drag it into the marketplace publisher dashboard to push live.
-
-If the Azure tenant ever gets unblocked (or someone makes a PAT via a
-different MS account), the `vsce publish -p $VSCE_PAT` step can be added
-to the workflow and the manual upload step disappears.
+**After the workflow finishes** the new version is live on both GitHub
+and the Marketplace — `npx vsce show mcc.image-overlay-preview` to
+double-check the live version.
 
 ## Format coverage
 
@@ -277,9 +285,6 @@ Roadmap is open. See backlog below for candidate items.
       keys, would need a different chord.
 - [ ] PSD composite preview via `ag-psd`. Same lazy-worker shape as
       HEIC. Niche but small effort.
-- [ ] Marketplace auto-publish via `vsce publish` in the release
-      workflow. **Blocked:** Azure DevOps PAT issuance fails with
-      `AADSTS5000225` on the current MS account. See "Release process".
 - [ ] Perf 方案 B — TIFF decode into a worker (mirror heic-worker's shape),
       keep the HEIC worker/WASM instance alive between decodes (today it
       re-instantiates per image), and stop emitting the doomed inline
