@@ -31,7 +31,10 @@ shows metadata as small floating cards anchored in fixed corners.
     `▶ 1.5s · 100%`; the optional histogram panel parks just above it.
 - **Browse the folder.** <kbd>←</kbd> / <kbd>→</kbd> step through sibling
   images in the same folder. Sort by filename / mtime / ctime / size,
-  ascending or descending — only supported formats are listed.
+  ascending or descending — only supported formats are listed. Neighbors
+  are prefetched and pre-decoded in the background so stepping is
+  instant, and opening never waits for the folder scan — in huge folders
+  the position counter pops in a beat after the image.
 - **Slideshow.** <kbd>Space</kbd> plays / pauses. <kbd>[</kbd> slows down,
   <kbd>]</kbd> speeds up (clamped 0.5–30 s). The BR pill shows the current
   interval.
@@ -70,7 +73,8 @@ shows metadata as small floating cards anchored in fixed corners.
 - **Zoom & pan.** Scroll to zoom (pivots on the cursor — the pixel under
   your pointer stays put), drag to pan, <kbd>0</kbd> or double-click to
   reset. Pointer capture means the pan keeps tracking even if you
-  release the mouse outside the VS Code window.
+  release the mouse outside the VS Code window, and input is coalesced
+  to the frame rate so high-polling-rate mice don't cause stutter.
 
 ## Supported formats
 
@@ -128,7 +132,7 @@ Grab the latest `.vsix` from the
 and run:
 
 ```bash
-code --install-extension image-overlay-preview-0.2.0.vsix
+code --install-extension image-overlay-preview-<version>.vsix
 ```
 
 ### From source
@@ -139,7 +143,7 @@ cd vscode-image-overlay
 npm install
 npm run build
 npx vsce package
-code --install-extension image-overlay-preview-0.2.0.vsix
+code --install-extension image-overlay-preview-<version>.vsix
 ```
 
 ## Development

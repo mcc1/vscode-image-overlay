@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.3 — Instant first paint, prefetched browsing
+
+Perf release — opening and browsing got visibly faster, especially in
+big folders — plus two correctness fixes found by the same review.
+
+- **Opening no longer waits for the folder scan.** The provider used to
+  stat every sibling image sequentially *before* building the webview,
+  so in a folder with thousands of images the first pixel waited for
+  all of them. The HTML now goes out right after a single stat of the
+  opened file; siblings are enumerated with parallel stats and delivered
+  to the webview afterwards over a ready/siblings handshake. In huge
+  folders the `3 / 47` counter now pops in a beat after the image —
+  that's the enumeration finishing, not the image.
+- **←/→ and slideshow are near-instant.** The previous and next images
+  are prefetched and pre-decoded (`Image()` + `decode()`) as soon as
+  the current one settles, so stepping hits Chromium's decoded-image
+  cache instead of starting from disk.
+- **Smoother pan / zoom on high-polling-rate mice.** Wheel, drag-pan
+  and the corner proximity fade used to do DOM writes plus a forced
+  layout per input event (a 1000 Hz mouse ≈ 1000 layouts/s). They're
+  now coalesced to one batch per animation frame, and overlay cards
+  skip re-rendering when their content didn't change.
+- **The metadata second-read is now bounded.** The color-space
+  enrichment pass re-fetched the file with a Range header that the
+  webview's service worker ignores — a 50 MB PNG got read (and
+  allocated) in full a second time. It now stream-reads just the head
+  (256 KB for PNG, 1 MB for ISOBMFF) and cancels the rest.
+- **Fixed: fast ←/→ could paint the previous image's EXIF onto the
+  next one.** EXIF parse results now commit through the same
+  generation token the image swap uses, so a slow parse from image A
+  can't land on image B.
+- **Fixed: EXIF/XMP-derived strings rendered unescaped in the capture
+  card** (white balance / flash / metering and the exposure line). A
+  crafted image could inject markup into the webview — script execution
+  was already blocked by CSP, but markup shouldn't render either. Same
+  class of fix host-side: a filename containing `</script>` can no
+  longer break out of the injected-context script block.
+
+No new dependencies. Tests stay at 66; `viewer.js` grew ~1 KB.
+
 ## 0.3.2 — README catches up with 0.3.1
 
 Doc-only release. README now mentions the cursor-centered zoom and the
