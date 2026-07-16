@@ -243,34 +243,6 @@ Roadmap is open. See backlog below for candidate items.
 
 ### Backlog (no version pinned)
 
-**Bugs / cleanups (2026-07-16 full review — verified findings, not yet fixed)**
-- [ ] `format.ts` Flash chip: `includes('no flash')` never matches exifr's
-      real translated strings ("Flash did not fire", "...compulsory flash
-      mode", …) → spurious flash line on every non-flash photo. The fixture
-      in `tests/format.test.ts` uses `Flash: 'No flash'`, a shape real data
-      never produces — fix code + fixture together.
-- [ ] `describeColorMode`: real exifr gives TIFF `BitsPerSample` as an
-      object `{0:8,1:8,2:8}`, not a scalar → bit depth never shows for TIFF
-      (`typeof === 'number'` filters it out).
-- [ ] Windows: `createFileSystemWatcher(fsPath string)` uses a backslash
-      path as a glob → never matches, `fileUpdate` live-refresh is dead on
-      Windows. Use `new vscode.RelativePattern(dirUri, basename)`.
-- [ ] `imageOverlay.autoContrast` setting is injected into ctx but never
-      read by main.ts — wire it (skip sampling, fixed glass) or drop it.
-- [ ] `iso-bmff.ts` `walkBoxes`: box size 0 (extends-to-EOF) or 1 (64-bit
-      size) aborts the whole walk instead of handling/skipping → HDR
-      detection silently lost when e.g. a size-0 `mdat` precedes `meta`.
-      Add size-0/1 (and oversized-length) cases to the parser tests.
-- [ ] Slideshow tick is scheduled at swap start, not image-ready — an
-      interval shorter than decode time keeps skipping past images.
-- [ ] `swapTo` doesn't reset `state.hasAlpha` → previous image's RGB/RGBA
-      briefly shows in the file card during a swap.
-- [ ] GPS map card DOM (incl. tile `<img>`s) is rebuilt on every `render()`
-      (I/E toggles, swaps) — cache the rendered map HTML per image.
-- [ ] `analyzeCorners` + `detectAlpha` each `drawImage` separately before
-      the first overlay render — merge into one downscaled sample.
-- [ ] `getNonce()` uses `Math.random` — switch to `crypto.getRandomValues`.
-
 **Polish**
 - [ ] Marketplace listing screenshots / a short animated GIF.
       User has to capture them; tooling pointer is ScreenToGif on Win.

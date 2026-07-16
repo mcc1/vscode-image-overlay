@@ -26,11 +26,35 @@ function* walkBoxes(u8: Uint8Array, start: number, end: number): Iterable<Box> {
   const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   let p = start;
   while (p + 8 <= end) {
-    const size = dv.getUint32(p);
+    const size32 = dv.getUint32(p);
     const type = readType(u8, p + 4);
-    if (size < 8 || p + size > end) return;
-    yield { type, payloadStart: p + 8, payloadEnd: p + size };
-    p += size;
+    let headerSize = 8;
+    let boxSize: number;
+    if (size32 === 0) {
+      // ISOBMFF: size 0 means "this box extends to the end of the
+      // enclosing structure" (a trailing top-level mdat whose length
+      // wasn't known at write time). Consume the rest of the slice; the
+      // while loop then ends naturally on the next check.
+      boxSize = end - p;
+    } else if (size32 === 1) {
+      // ISOBMFF: size 1 means the real size is a 64-bit "largesize" in
+      // the 8 bytes right after the type, so the header is 16 bytes.
+      if (p + 16 > end) return;
+      const hi = dv.getUint32(p + 8);
+      const lo = dv.getUint32(p + 12);
+      const largesize = hi * 0x100000000 + lo;
+      if (!Number.isSafeInteger(largesize) || largesize < 16 || largesize > end - p) return;
+      headerSize = 16;
+      boxSize = largesize;
+    } else if (size32 < 8 || p + size32 > end) {
+      // Genuinely malformed: below the minimum box header size, or
+      // claims more bytes than remain in this slice.
+      return;
+    } else {
+      boxSize = size32;
+    }
+    yield { type, payloadStart: p + headerSize, payloadEnd: p + boxSize };
+    p += boxSize;
   }
 }
 

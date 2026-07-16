@@ -201,6 +201,12 @@ describe('describeColorMode', () => {
   it('uses BitsPerSample when BitDepth missing', () => {
     expect(describeColorMode({ BitsPerSample: 8, ColorType: 2 })).toBe('8-bit RGB');
   });
+  it('extracts the first channel when BitsPerSample is exifr\'s real per-channel object (TIFF)', () => {
+    // Real exifr TIFF output shape: {0: 8, 1: 8, 2: 8}, not a scalar.
+    const bps = { 0: 8, 1: 8, 2: 8 };
+    expect(describeColorMode({ BitsPerSample: bps })).toBe('8-bit');
+    expect(describeColorMode({ BitsPerSample: bps }, false)).toBe('8-bit RGB');
+  });
   it('falls back to hasAlpha when no PNG colorType', () => {
     expect(describeColorMode({ BitsPerSample: 8 }, true)).toBe('8-bit RGBA');
     expect(describeColorMode({ BitsPerSample: 8 }, false)).toBe('8-bit RGB');
@@ -227,11 +233,24 @@ describe('describeCaptureExtras', () => {
   it('hides default / no-flash / Unknown values', () => {
     const lines = describeCaptureExtras({
       WhiteBalance: 'Auto',
-      Flash: 'No flash',
+      Flash: 'Flash did not fire',
       MeteringMode: 'Unknown',
       ExposureBiasValue: 0,
     });
     expect(lines).toEqual([]);
+  });
+  it('hides every real exifr "did not fire" flash phrasing, shows real "fired" phrasings', () => {
+    // exifr (translateValues: true) never emits the literal token "No
+    // flash" for tag 0x9209 — it builds phrases around "did not fire" /
+    // "fired". Regression coverage for the chip that used to key off a
+    // token real data never produces.
+    expect(describeCaptureExtras({ Flash: 'Flash did not fire' })).toEqual([]);
+    expect(describeCaptureExtras({ Flash: 'Flash did not fire, compulsory flash mode' }))
+      .toEqual([]);
+    expect(describeCaptureExtras({ Flash: 'Flash did not fire, auto mode' })).toEqual([]);
+    expect(describeCaptureExtras({ Flash: 'Flash fired' })).toEqual(['Flash fired']);
+    expect(describeCaptureExtras({ Flash: 'Flash fired, red-eye reduction mode' }))
+      .toEqual(['Flash fired, red-eye reduction mode']);
   });
   it('handles flash as numeric bitfield (LSB = fired)', () => {
     const lines = describeCaptureExtras({ Flash: 1 });

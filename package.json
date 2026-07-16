@@ -118,7 +118,7 @@
             "Do not link GPS coordinates"
           ],
           "default": "openstreetmap",
-          "description": "Map service to open when clicking GPS coordinates."
+          "description": "Map service to open when clicking GPS coordinates. The inline thumbnail always renders OpenStreetMap tiles — this setting only picks the click-through target."
         },
         "imageOverlay.browseSortBy": {
           "type": "string",

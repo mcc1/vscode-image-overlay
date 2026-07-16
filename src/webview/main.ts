@@ -197,6 +197,13 @@ function getHistWorkerUrl(): string {
 let lastCursor = { x: -1, y: -1 };
 
 function renderMapThumb(lat: number, lon: number, linkUrl: string | null, label: string): string {
+  // The thumbnail is ALWAYS OpenStreetMap tiles (free, keyless, CSP-allowed);
+  // gpsMapProvider only picks where a click navigates. Surface that in the
+  // tooltip so "provider: google" doesn't read as a mis-rendered thumbnail.
+  const providerName =
+    ctx.gpsMapProvider === 'google' ? 'Google Maps'
+    : ctx.gpsMapProvider === 'apple' ? 'Apple Maps'
+    : 'OpenStreetMap';
   const view = computeMapView(lat, lon, 13, 200, 130);
   const tiles = view.tiles.map((t) =>
     `<img class="map-tile" src="${escapeAttr(t.url)}" style="left:${t.left}px;top:${t.top}px" alt="" aria-hidden="true" />`
@@ -210,7 +217,7 @@ function renderMapThumb(lat: number, lon: number, linkUrl: string | null, label:
     </div>
   `;
   return linkUrl
-    ? `<a class="map-link" href="${escapeAttr(linkUrl)}" title="Open in map">${body}</a>`
+    ? `<a class="map-link" href="${escapeAttr(linkUrl)}" title="Open in ${escapeAttr(providerName)}">${body}</a>`
     : `<div class="map-link static">${body}</div>`;
 }
 
@@ -357,11 +364,11 @@ function render() {
 
   if (state.expanded) {
     // Expanded mode replaces the TL capture card with the full EXIF table.
-    // BL/TR stay empty so the table has room to grow; BR keeps zoom % so the
-    // user still has a zoom indicator while inspecting EXIF.
+    // BL/TR are hidden via CSS (body.expanded) rather than emptied — routing
+    // their HTML through '' would tear down and rebuild the TR map card's tile
+    // <img>s on every expand→collapse round-trip. BR keeps zoom % so the user
+    // still has a zoom indicator while inspecting EXIF.
     renderExpanded();
-    setOverlay('bl', '');
-    setOverlay('tr', '');
   } else {
     setOverlay('tl', buildCaptureHtml());
     setOverlay('bl', buildFileHtml());
@@ -473,39 +480,78 @@ function renderExpanded() {
   setOverlay(target, html);
 }
 
-async function analyzeCorners(): Promise<void> {
+// Single downscaled sample that feeds both the per-corner glass tint and
+// alpha detection. Merged so a possibly-huge image is rasterized ONCE (one
+// drawImage) instead of once per concern. Two distinct responsibilities:
+//   - alpha: always runs (except the jpg/jpeg/bmp short-circuit) — it feeds
+//     the RGB/RGBA line in the file card regardless of the auto-contrast
+//     setting, so the draw + alpha scan are unconditional.
+//   - luminance: only when ctx.autoContrast — picks on-dark/on-light glass per
+//     corner. When off, both classes are stripped so the base glass applies.
+// Note: at a 200×200 downscale, translucency confined to sub-sample-scale
+// (~1px in a large source) can be averaged away and missed — an accepted
+// trade-off for not rasterizing the full image twice.
+async function analyzeImageSample(): Promise<void> {
+  const size = 200;
+  const ext = getExt(state.filename).toLowerCase();
+  // Formats that structurally can't carry alpha: definitive false up front,
+  // independent of whether the canvas read below succeeds.
+  const alphaCapable = !['jpg', 'jpeg', 'bmp'].includes(ext);
+  if (!alphaCapable) state.hasAlpha = false;
   try {
-    const size = 200;
     const canvas = document.createElement('canvas');
     canvas.width = size;
     canvas.height = size;
     const cctx = canvas.getContext('2d');
     if (!cctx) return;
     cctx.drawImage(img, 0, 0, size, size);
-    const rs = 56;
-    const regions: Array<{ key: CornerKey; x: number; y: number }> = [
-      { key: 'tl', x: 0, y: 0 },
-      { key: 'tr', x: size - rs, y: 0 },
-      { key: 'bl', x: 0, y: size - rs },
-      { key: 'br', x: size - rs, y: size - rs },
-    ];
-    // Per-corner luminance only — used to pick on-dark vs on-light glass tint.
+
+    // Per-corner luminance — used to pick on-dark vs on-light glass tint.
     // No more ranking: slot assignment is fixed (see FIXED_LAYOUT comment).
-    for (const r of regions) {
-      const data = cctx.getImageData(r.x, r.y, rs, rs).data;
-      let sum = 0;
-      let n = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        sum += lum;
-        n++;
+    if (ctx.autoContrast) {
+      const rs = 56;
+      const regions: Array<{ key: CornerKey; x: number; y: number }> = [
+        { key: 'tl', x: 0, y: 0 },
+        { key: 'tr', x: size - rs, y: 0 },
+        { key: 'bl', x: 0, y: size - rs },
+        { key: 'br', x: size - rs, y: size - rs },
+      ];
+      for (const r of regions) {
+        const data = cctx.getImageData(r.x, r.y, rs, rs).data;
+        let sum = 0;
+        let n = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          sum += lum;
+          n++;
+        }
+        const mean = sum / n;
+        overlays[r.key].classList.toggle('on-dark', mean < 128);
+        overlays[r.key].classList.toggle('on-light', mean >= 128);
       }
-      const mean = sum / n;
-      overlays[r.key].classList.toggle('on-dark', mean < 128);
-      overlays[r.key].classList.toggle('on-light', mean >= 128);
+    } else {
+      // Auto-contrast off: no per-corner sampling — strip both tint classes so
+      // the neutral base glass style applies uniformly.
+      for (const key of Object.keys(overlays) as CornerKey[]) {
+        overlays[key].classList.remove('on-dark', 'on-light');
+      }
+    }
+
+    // Alpha — scan the whole downscaled canvas so a fully-opaque image yields
+    // false. Done last so a valid result isn't clobbered by a later throw.
+    if (alphaCapable) {
+      const data = cctx.getImageData(0, 0, size, size).data;
+      let alpha = false;
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] < 255) { alpha = true; break; }
+      }
+      state.hasAlpha = alpha;
     }
   } catch (err) {
-    console.warn('[image-overlay] corner analysis failed', err);
+    console.warn('[image-overlay] image sample failed', err);
+    // Corner tint just stays as-is; alpha is unknown → null (so the file card
+    // omits the RGB/RGBA line) unless the format short-circuit already set it.
+    if (alphaCapable) state.hasAlpha = null;
   }
 }
 
@@ -592,35 +638,6 @@ async function enrichExifFromFormat(uri: string, name: string): Promise<Record<s
   } catch (err) {
     console.warn('[image-overlay] format enrichment failed', err);
     return {};
-  }
-}
-
-function detectAlpha(): void {
-  // Skip formats that can't have alpha
-  const ext = getExt(state.filename).toLowerCase();
-  if (['jpg', 'jpeg', 'bmp'].includes(ext)) {
-    state.hasAlpha = false;
-    return;
-  }
-  try {
-    const size = 48;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const cctx = canvas.getContext('2d');
-    if (!cctx) return;
-    // Fill with a sentinel color so we can distinguish transparent from the default
-    cctx.drawImage(img, 0, 0, size, size);
-    const data = cctx.getImageData(0, 0, size, size).data;
-    for (let i = 3; i < data.length; i += 4) {
-      if (data[i] < 255) {
-        state.hasAlpha = true;
-        return;
-      }
-    }
-    state.hasAlpha = false;
-  } catch {
-    state.hasAlpha = null;
   }
 }
 
@@ -837,6 +854,10 @@ function loadImageInto(uri: string, name: string): void {
         <div class="meta dim">${label} decode failed</div>
         <div class="meta dim" style="font-size:10px;opacity:0.7;word-break:break-word;">${escapeHtml(detail)}</div>`;
       overlays.tl.classList.remove('empty');
+      // No 'load' event fires on a failed decode, so onImageReady won't run to
+      // pace the slideshow — reschedule here so a broken TIFF/HEIC doesn't
+      // stall the show forever on the image that never decoded.
+      if (state.slideshowOn) scheduleSlideshowTick();
     });
   } else {
     // Switching to a natively-renderable format — release any previous
@@ -860,8 +881,7 @@ async function onImageReady(): Promise<void> {
   // max-width/max-height to explicit pixel sizing — that's what avoids
   // the GPU compositor tile-seam bug on big photos.
   applyTransform();
-  await analyzeCorners();
-  detectAlpha();
+  await analyzeImageSample();
   render();
   // EXIF parse and format enrichment are independent reads of the same file,
   // so run them concurrently. Both RETURN their data now (rather than mutating
@@ -891,6 +911,11 @@ async function onImageReady(): Promise<void> {
   // Image is settled and the gen is still current (guarded above) — warm the
   // immediate neighbors so ←/→ and slideshow swaps show pixels instantly.
   schedulePrefetch();
+  // Slideshow pacing: the tick no longer self-reschedules — it schedules the
+  // next advance only once the swap has actually settled here (and this load
+  // wasn't superseded, guarded above). That's what stops a short interval from
+  // racing past slow-decoding images.
+  if (state.slideshowOn) scheduleSlideshowTick();
 }
 
 // --- Histogram (full-pixel scan, opt-in via H) ---
@@ -1198,6 +1223,9 @@ img.addEventListener('error', () => {
     <div class="title">${escapeHtml(state.filename)}</div>
     <div class="meta dim">failed to load preview</div>`;
   overlays.tl.classList.remove('empty');
+  // Same slideshow-stall guard as the decode catch: a broken native-format
+  // image never reaches onImageReady, so keep the show moving from here.
+  if (state.slideshowOn) scheduleSlideshowTick();
 });
 
 // --- rAF-coalesced DOM work for high-frequency input ---
@@ -1408,6 +1436,10 @@ function swapTo(idx: number): void {
   // Clear stale EXIF immediately so the previous image's data doesn't flash
   // through the next render() before exif reload finishes.
   state.exif = null;
+  // Same for alpha — the file card's RGB/RGBA line is derived from
+  // state.hasAlpha, so drop it too or the previous image's channel count
+  // flashes until the merged sampler recomputes it in onImageReady.
+  state.hasAlpha = null;
   // loadImageInto bumps state.loadGen and wires the load handler with the
   // race-safe gen check; works for both regular images and TIFF.
   loadImageInto(sib.uri, sib.name);
@@ -1437,11 +1469,18 @@ function stopSlideshow(): void {
 }
 
 function scheduleSlideshowTick(): void {
+  // Always clear any pending timer first, so every scheduling path (first
+  // tick, per-image settle, speed change, a manual ←/→ that lands its own
+  // onImageReady) collapses to a single live timer — no parallel chains.
   if (slideshowTimer != null) clearTimeout(slideshowTimer);
   slideshowTimer = window.setTimeout(() => {
     if (!state.slideshowOn) return;
+    // Advance one image and stop — deliberately NOT self-rescheduling. The
+    // next tick is armed from wherever this swap settles (onImageReady after
+    // its gen check, or a decode/error handler for a broken file), so an
+    // interval shorter than decode time can't skip past images that never
+    // actually displayed.
     navigate(+1, /*manual*/ false);
-    if (state.slideshowOn) scheduleSlideshowTick();
   }, state.slideshowIntervalMs);
 }
 

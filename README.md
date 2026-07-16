@@ -66,7 +66,9 @@ shows metadata as small floating cards anchored in fixed corners.
   colour box).
 - **Inline GPS map.** When the file has GPS coordinates, the TR card shows
   a small OSM static map; click to open the full map in your configured
-  provider.
+  provider. The thumbnail itself always renders OpenStreetMap tiles
+  (Google/Apple offer no keyless static tiles) — `gpsMapProvider` only
+  picks where the click goes.
 - **Auto-contrast.** Each corner samples its own background luminance to
   pick a light- or dark-friendly glass tint.
 - **Fully hideable.** Press <kbd>I</kbd> to toggle all overlays off.
@@ -117,7 +119,7 @@ for `nclx` / `cICP`.
 | `imageOverlay.defaultVisible` | `true` | Show overlay by default when opening. |
 | `imageOverlay.autoContrast` | `true` | Adapt overlay contrast to local background. |
 | `imageOverlay.showHintOnOpen` | `true` | Briefly show the keyboard-shortcut hint. |
-| `imageOverlay.gpsMapProvider` | `openstreetmap` | `openstreetmap` / `google` / `apple` / `none`. |
+| `imageOverlay.gpsMapProvider` | `openstreetmap` | `openstreetmap` / `google` / `apple` / `none`. Click-through target only — the thumbnail is always OSM. |
 | `imageOverlay.browseSortBy` | `filename` | Sort sibling images by `filename` / `mtime` / `ctime` / `size`. |
 | `imageOverlay.browseSortOrder` | `asc` | `asc` or `desc`. |
 | `imageOverlay.browseLoop` | `false` | Wrap around at the first / last image (also applies to slideshow). |

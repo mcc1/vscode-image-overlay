@@ -128,9 +128,15 @@ export function describeColorMode(
 ): string {
   // PNG IHDR colorType: 0=grayscale, 2=RGB, 3=palette, 4=grayscale+alpha, 6=RGB+alpha
   const colorType = e?.ColorType as number | undefined;
-  const bits = pick<number>(e, 'BitDepth', 'BitsPerSample');
+  const bitsRaw = pick(e, 'BitDepth', 'BitsPerSample');
+  // exifr gives TIFF BitsPerSample as a per-channel object (e.g.
+  // {0: 8, 1: 8, 2: 8}), not a scalar — take the first channel's value.
+  // Covers arrays too, since Object.values on an array is its elements.
+  const bits = typeof bitsRaw === 'object' && bitsRaw !== null
+    ? Object.values(bitsRaw as Record<string, unknown>)[0]
+    : bitsRaw;
   const parts: string[] = [];
-  if (typeof bits === 'number') parts.push(`${bits}-bit`);
+  if (typeof bits === 'number' && isFinite(bits)) parts.push(`${bits}-bit`);
 
   if (typeof colorType === 'number') {
     const ct = colorType === 0 ? 'Gray'
@@ -154,8 +160,12 @@ export function describeCaptureExtras(e: Record<string, unknown>): string[] {
     typeof wb === 'string' && wb.toLowerCase() !== 'auto' ? wb
     : wb === 1 ? 'Manual WB' : '';
   const flash = pick<string | number>(e, 'Flash');
+  // exifr (translateValues: true) renders tag 0x9209 as phrases built
+  // around "did not fire" / "fired", e.g. "Flash did not fire, auto
+  // mode" — it never emits the literal token "no flash". Keep that token
+  // as a harmless extra guard for other producers.
   const flashStr = typeof flash === 'string'
-    ? (flash.toLowerCase().includes('no flash') ? '' : flash)
+    ? (/did not fire|no flash/.test(flash.toLowerCase()) ? '' : flash)
     : typeof flash === 'number' && flash & 1 ? 'Flash fired' : '';
   const metering = pick<string>(e, 'MeteringMode');
   const meteringStr = typeof metering === 'string' && metering !== 'Unknown' ? metering : '';

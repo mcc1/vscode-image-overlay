@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 interface ImageDocument extends vscode.CustomDocument {
   readonly uri: vscode.Uri;
@@ -175,9 +176,17 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       if (this.activePanel === webviewPanel) setActive(undefined);
     });
 
-    // Live refresh if the file changes on disk
-    const watcher = vscode.workspace.createFileSystemWatcher(document.uri.fsPath);
-    const refresh = async () => {
+    // Live refresh if the file changes on disk. createFileSystemWatcher(fsPath)
+    // used to hand the raw absolute path to the GlobPattern string overload —
+    // on Windows backslashes are glob escape characters, so the pattern never
+    // matched and this feature was silently dead. Watch the containing
+    // directory (non-recursive '*', matching enumerateSiblings) and filter
+    // events down to the opened file instead. Filtering via the basename as
+    // the glob pattern would just trade one bug for another: '[', ']', '{',
+    // '}' are legal in filenames and are also glob special characters.
+    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(imageDir, '*'));
+    const refresh = async (uri: vscode.Uri) => {
+      if (!samePath(uri.fsPath, document.uri.fsPath)) return;
       try {
         const s = await vscode.workspace.fs.stat(document.uri);
         webviewPanel.webview.postMessage({
@@ -329,10 +338,23 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
   }
 }
 
+// Path equality for the live-refresh watcher filter: normalizes separators
+// and matches Windows' case-insensitive filesystem semantics (win32 only —
+// other platforms are typically case-sensitive on disk).
+function samePath(a: string, b: string): boolean {
+  const na = path.normalize(a);
+  const nb = path.normalize(b);
+  return process.platform === 'win32' ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+}
+
 function getNonce(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let out = '';
-  for (let i = 0; i < 32; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
+  // crypto.randomBytes, not Math.random — this nonce gates script-src in the
+  // CSP, so it needs to be unguessable. Modulo-62 over 256 byte values has a
+  // slight bias (256 % 62 !== 0) but that's fine for a nonce, not a secret.
+  const bytes = crypto.randomBytes(32);
+  for (let i = 0; i < 32; i++) out += chars.charAt(bytes[i] % chars.length);
   return out;
 }
 

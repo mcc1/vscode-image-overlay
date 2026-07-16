@@ -159,6 +159,15 @@ body.expanded .corner.tl {
   pointer-events: auto;
 }
 
+/* Expanded mode hides the file (BL) and GPS (TR) corners so the EXIF table
+   owns the space. Hidden, not emptied — display:none keeps their innerHTML
+   (and the TR map card's tile <img>s) intact across expand→collapse→expand,
+   and gives them a 0×0 rect so the cursor-proximity pass skips them. */
+body.expanded .corner.bl,
+body.expanded .corner.tr {
+  display: none;
+}
+
 .card-section > * + * { margin-top: 2px; }
 .card-section .title + .meta.big { margin-top: 4px; }
 

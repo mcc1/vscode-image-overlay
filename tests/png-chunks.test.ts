@@ -46,6 +46,21 @@ describe('findPngCicp', () => {
     const bad = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, ...IHDR, ...IEND]);
     expect(findPngCicp(bad)).toBeNull();
   });
+
+  it('stops safely (no throw) when a chunk length field exceeds the remaining buffer', () => {
+    // Regression guard for the same class of bug fixed in iso-bmff.ts's
+    // walkBoxes (oversized/malformed size field): the declared length
+    // here is far larger than the bytes that actually follow it.
+    const dataLen = new Uint8Array([9, 16, 9, 1]);
+    const bogus = new Uint8Array(8 + dataLen.length);
+    const dv = new DataView(bogus.buffer);
+    dv.setUint32(0, 0xfffffff0);
+    for (let i = 0; i < 4; i++) bogus[4 + i] = 'cICP'.charCodeAt(i);
+    bogus.set(dataLen, 8);
+    const file = cat(SIG, IHDR, bogus, IEND);
+    expect(() => findPngCicp(file)).not.toThrow();
+    expect(findPngCicp(file)).toBeNull();
+  });
 });
 
 describe('findPngIccpName', () => {
