@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.4 — EXIF accuracy, Windows live refresh, steadier slideshow
+
+Ten verified findings from the 0.3.3 review, all fixed:
+
+- **Fixed: spurious "Flash did not fire…" line on every non-flash
+  photo.** The capture card matched flash strings against a phrase
+  exifr never actually produces; it now recognizes the real translated
+  strings. Test fixtures switched to real-world shapes so this can't
+  silently regress.
+- **Fixed: TIFF bit depth never displayed.** Real exifr reports TIFF
+  `BitsPerSample` as an object (`{0:8,1:8,2:8}`), not a number — the
+  file card now unwraps it and shows "8-bit RGB" as intended.
+- **Fixed: live refresh was dead on Windows.** The file watcher passed
+  a raw backslash path as a glob pattern, which never matches. It now
+  watches the containing folder and filters events to the open file —
+  overwriting an open image finally refreshes the view on Windows.
+- **`imageOverlay.autoContrast` actually works now.** The setting
+  existed but was never read. Off = fixed glass tint; alpha detection
+  still runs so the RGB/RGBA line stays accurate.
+- **Steadier slideshow.** The next tick is scheduled when the image
+  actually finishes decoding (or fails), not when the swap starts — a
+  short interval no longer races past slow-decoding images, and a
+  broken file advances the show instead of stalling it.
+- **No more stale color-mode flash during ←/→** — the previous image's
+  RGB/RGBA no longer shows in the file card while the next one loads.
+- **GPS map card survives expanded mode.** `E` now hides the BL/TR
+  corners via CSS instead of tearing them down, so collapsing no longer
+  rebuilds the map tiles.
+- **GPS tooltip names your map provider** ("Open in Google Maps"), and
+  the setting/README now say explicitly: the inline thumbnail always
+  renders OpenStreetMap tiles — `gpsMapProvider` only picks where a
+  click goes.
+- **HDR detection survives odd ISOBMFF layouts.** Box size 0
+  (extends-to-EOF) and 1 (64-bit size) no longer abort the container
+  walk; parsing is overflow-guarded with new parser tests.
+- Corner luminance sampling and alpha detection merged into a single
+  downscaled pass before the first overlay paint; the CSP nonce now
+  comes from crypto randomness instead of `Math.random`.
+
+No new dependencies. Tests 66 → 74.
+
 ## 0.3.3 — Instant first paint, prefetched browsing
 
 Perf release — opening and browsing got visibly faster, especially in
