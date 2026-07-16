@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.5 — TIFF/HEIC: worker decode, no transcode round-trip
+
+The 0.3.3 perf work made PNG/JPG fast; this release does the heavy
+formats.
+
+- **HEIC browsing is near-instant.** ←/→ neighbors are pre-decoded into
+  a bounded ImageBitmap cache (2 entries / 33 M pixels), and a swap that
+  outruns the prefetch now rides the in-flight decode instead of
+  decoding the same file twice.
+- **TIFF decoding left the main thread.** Big TIFFs no longer freeze the
+  UI while they decode (new lazy ~84 KB utif worker).
+- **The PNG transcode round-trip is gone.** Decoded pixels draw straight
+  onto a canvas instead of being re-encoded to PNG and re-decoded by
+  `<img>` — that was seconds of pure waste on large files.
+- **libheif's WASM instantiates once per viewer, not once per image**
+  (persistent request-multiplexed workers). Workers spin up in parallel
+  with the file read, self-terminate after 60 s idle so background tabs
+  don't pin WASM heaps, and per-image decoder handles are freed — they
+  would have leaked in a persistent worker.
+- **TIFF/HEIC files are no longer read twice** (the doomed inline
+  `<img src>` load is gone).
+- **Mixed folders stay snappy.** Background pre-decoding only arms once
+  you actually navigate inside a viewer (or opened a TIFF/HEIC
+  directly), so Explorer-clicking JPGs that sit next to HEICs doesn't
+  spin up background decode work.
+- Live refresh (file overwritten on disk) invalidates the decoded
+  cache, so navigating away and back can't show pre-edit pixels.
+
+Expectation note: a single cold HEIC open is still bounded by the
+libheif decode itself — the wins are everything around it (browsing,
+UI responsiveness, repeated costs).
+
+No new runtime dependencies. Tests stay at 74.
+
 ## 0.3.4 — EXIF accuracy, Windows live refresh, steadier slideshow
 
 Ten verified findings from the 0.3.3 review, all fixed:

@@ -1,7 +1,4 @@
 import exifr from 'exifr';
-// TIFF decoder. utif is CJS but esbuild handles interop; the namespace
-// import gives us the decode / decodeImage / toRGBA8 functions we need.
-import * as UTIF from 'utif';
 import {
   fmtSize, fmtExposure, formatMaybeDate, getExt, gcdRatio,
   escapeHtml, escapeAttr,
@@ -36,6 +33,7 @@ interface InjectedCtx {
   slideshowIntervalMs: number;
   histogramOn: boolean;
   heicWorkerUri: string;
+  tiffWorkerUri: string;
 }
 
 const ctx = (window as unknown as { __IMG_CTX__: InjectedCtx }).__IMG_CTX__;
@@ -57,6 +55,17 @@ const img = document.getElementById('img') as HTMLImageElement;
 // tile-seam bug that draws 1px black lines across large scaled images.
 // See media/viewer.css for the matching #img-wrap rules.
 const imgWrap = document.getElementById('img-wrap') as HTMLDivElement;
+// Canvas presentation surface for decoder formats (TIFF/HEIC). The provider
+// HTML is frozen (it only ships the <img>), so the canvas is created here and
+// parked alongside <img> inside #img-wrap. Exactly one of the two is visible
+// at a time — applyTransform() sizes/shows the active element and display:none
+// hides the other. TIFF/HEIC decode straight onto this canvas via ImageBitmap,
+// skipping the old RGBA → PNG-encode → <img> re-decode round-trip.
+const canvas = document.createElement('canvas');
+canvas.id = 'canvas';
+canvas.draggable = false;
+canvas.style.display = 'none';
+imgWrap.appendChild(canvas);
 const stage = document.getElementById('stage') as HTMLDivElement;
 const hint = document.getElementById('hint') as HTMLDivElement;
 
@@ -88,19 +97,21 @@ const state = {
   slideshowIntervalMs: ctx.slideshowIntervalMs,
   // Generation token for image swaps. Each navigate() bumps this; pending
   // image-load handlers compare against it and bail if superseded. Without
-  // this, fast ←/→ presses can race and call onImageReady() out of order.
+  // this, fast ←/→ presses can race and call settleImage() out of order.
   loadGen: 0,
-  // For TIFF: <img> can't render TIFF natively, so we decode via utif into
-  // a PNG blob and point img at that. Track the URL so we can revoke it
-  // on the next swap (otherwise blob URLs accumulate in memory).
-  currentBlobUrl: null as string | null,
-  // True between "we know this is TIFF/HEIC" and "the decoded blob has
-  // loaded into <img>". The error handler uses these (alongside is*Name)
-  // to suppress the inline-load error event the browser fires on the
-  // original unsupported bytes.
-  tiffDecoding: false,
-  heicDecoding: false,
+  // Which surface is live: the native <img> or the decode <canvas>. TIFF/HEIC
+  // present on the canvas; everything else on the <img>. activeEl() reads this
+  // so the sampler, histogram and applyTransform all target the right element.
+  presenting: 'img' as 'img' | 'canvas',
 };
+
+// The element currently showing pixels. Consumers that read the decoded image
+// (corner luminance sampler, histogram, transform sizing) go through this so
+// they work identically whether the source is a native <img> or a decoded
+// <canvas>.
+function activeEl(): HTMLImageElement | HTMLCanvasElement {
+  return state.presenting === 'canvas' ? canvas : img;
+}
 
 // Slideshow tuning bounds.
 const SLIDESHOW_MIN_MS = 500;
@@ -493,18 +504,34 @@ function renderExpanded() {
 // trade-off for not rasterizing the full image twice.
 async function analyzeImageSample(): Promise<void> {
   const size = 200;
+  // Canvas path (TIFF/HEIC): state.hasAlpha was already set from the worker's
+  // authoritative full-resolution scan — don't second-guess it with a 200×200
+  // downscale (translucency finer than the sample grid would be averaged away).
+  const onCanvas = state.presenting === 'canvas';
   const ext = getExt(state.filename).toLowerCase();
   // Formats that structurally can't carry alpha: definitive false up front,
-  // independent of whether the canvas read below succeeds.
+  // independent of whether the canvas read below succeeds. (img path only —
+  // the canvas path's alpha is the worker's, left untouched.)
   const alphaCapable = !['jpg', 'jpeg', 'bmp'].includes(ext);
-  if (!alphaCapable) state.hasAlpha = false;
+  if (!onCanvas && !alphaCapable) state.hasAlpha = false;
+
+  // Auto-contrast off: no per-corner luminance sampling — strip both tint
+  // classes so the neutral base glass applies. When also on the canvas path,
+  // there's no alpha work left either, so nothing to draw — bail early.
+  if (!ctx.autoContrast) {
+    for (const key of Object.keys(overlays) as CornerKey[]) {
+      overlays[key].classList.remove('on-dark', 'on-light');
+    }
+    if (onCanvas) return;
+  }
+
   try {
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const cctx = canvas.getContext('2d');
+    const sample = document.createElement('canvas');
+    sample.width = size;
+    sample.height = size;
+    const cctx = sample.getContext('2d');
     if (!cctx) return;
-    cctx.drawImage(img, 0, 0, size, size);
+    cctx.drawImage(activeEl(), 0, 0, size, size);
 
     // Per-corner luminance — used to pick on-dark vs on-light glass tint.
     // No more ranking: slot assignment is fixed (see FIXED_LAYOUT comment).
@@ -529,17 +556,11 @@ async function analyzeImageSample(): Promise<void> {
         overlays[r.key].classList.toggle('on-dark', mean < 128);
         overlays[r.key].classList.toggle('on-light', mean >= 128);
       }
-    } else {
-      // Auto-contrast off: no per-corner sampling — strip both tint classes so
-      // the neutral base glass style applies uniformly.
-      for (const key of Object.keys(overlays) as CornerKey[]) {
-        overlays[key].classList.remove('on-dark', 'on-light');
-      }
     }
 
     // Alpha — scan the whole downscaled canvas so a fully-opaque image yields
-    // false. Done last so a valid result isn't clobbered by a later throw.
-    if (alphaCapable) {
+    // false. img path only; the canvas path kept the worker's value above.
+    if (!onCanvas && alphaCapable) {
       const data = cctx.getImageData(0, 0, size, size).data;
       let alpha = false;
       for (let i = 3; i < data.length; i += 4) {
@@ -550,8 +571,8 @@ async function analyzeImageSample(): Promise<void> {
   } catch (err) {
     console.warn('[image-overlay] image sample failed', err);
     // Corner tint just stays as-is; alpha is unknown → null (so the file card
-    // omits the RGB/RGBA line) unless the format short-circuit already set it.
-    if (alphaCapable) state.hasAlpha = null;
+    // omits the RGB/RGBA line) unless the format short-circuit / worker set it.
+    if (!onCanvas && alphaCapable) state.hasAlpha = null;
   }
 }
 
@@ -649,6 +670,13 @@ function applyTransform() {
   // large photos at non-integer scales).
   imgWrap.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
 
+  // Show the live surface, hide the other. The explicit-pixel sizing that
+  // dodges the GPU tile-seam bug is applied to whichever element is active.
+  const el = activeEl();
+  const other = el === img ? canvas : img;
+  other.style.display = 'none';
+  el.style.display = '';
+
   if (state.natural.w && state.natural.h) {
     const stageW = stage.clientWidth;
     const stageH = stage.clientHeight;
@@ -660,226 +688,422 @@ function applyTransform() {
       1,
     );
     const display = fitScale * state.zoom;
-    img.style.maxWidth = 'none';
-    img.style.maxHeight = 'none';
-    img.style.width = `${state.natural.w * display}px`;
-    img.style.height = `${state.natural.h * display}px`;
+    el.style.maxWidth = 'none';
+    el.style.maxHeight = 'none';
+    el.style.width = `${state.natural.w * display}px`;
+    el.style.height = `${state.natural.h * display}px`;
   } else {
     // No natural dims yet — let CSS max-width/max-height handle it.
-    img.style.width = '';
-    img.style.height = '';
-    img.style.maxWidth = '';
-    img.style.maxHeight = '';
+    el.style.width = '';
+    el.style.height = '';
+    el.style.maxWidth = '';
+    el.style.maxHeight = '';
   }
 
   updateZoomDisplay();
 }
 
-// --- TIFF rendering ---
-// Chromium can't decode TIFF in <img>. We catch .tif/.tiff at load time and
-// route through utif: fetch bytes → decode IFD → toRGBA8 → canvas → PNG
-// blob URL → set img.src. Everything downstream (corners, EXIF, histogram)
-// keeps working because they all read from the live <img>.
+// --- Decoder workers (HEIC and TIFF, each in its own Web Worker) ---
+// Chromium renders neither TIFF nor HEIC in an <img>. Each format has its own
+// long-lived Web Worker that decodes bytes → RGBA; we present that straight
+// onto <canvas> (no PNG re-encode round-trip). The worker bundles are their
+// own esbuild entrypoints, lazy-fetched the first time such a file opens. Both
+// the request buffer (in) and the RGBA (out) cross the boundary as
+// Transferables, so we never pay for a full-image copy.
 
-// Webview can't render HEIC natively (Chromium drops the format on most
-// platforms). We dispatch to a libheif-js Web Worker — built as its own
-// 1.4 MB bundle and lazy-fetched the first time a HEIC opens. The decoded
-// RGBA comes back over a Transferable so we don't pay for a 100 MB copy.
-
-// VS Code webview-resources sit on a different origin from the webview
-// itself, and `new Worker(url)` enforces same-origin. Workaround: fetch
-// the worker bundle, wrap it in a Blob, and spawn from the resulting
-// blob URL — blob URLs inherit the page origin, so same-origin passes.
-// Cached after first use so we don't re-fetch the 1.4 MB on every HEIC.
-let heicWorkerBlobUrl: string | null = null;
-async function getHeicWorkerBlobUrl(): Promise<string> {
-  if (heicWorkerBlobUrl) return heicWorkerBlobUrl;
-  const res = await fetch(ctx.heicWorkerUri);
-  if (!res.ok) throw new Error(`worker fetch ${res.status}`);
-  const src = await res.text();
-  const blob = new Blob([src], { type: 'application/javascript' });
-  heicWorkerBlobUrl = URL.createObjectURL(blob);
-  return heicWorkerBlobUrl;
+interface DecodeResult {
+  rgba: Uint8ClampedArray | Uint8Array;
+  width: number;
+  height: number;
+  hasAlpha: boolean;
 }
 
-async function decodeHeicToBlobUrl(uri: string): Promise<string> {
-  const res = await fetch(uri);
-  if (!res.ok) throw new Error(`fetch ${res.status}`);
-  const buf = await res.arrayBuffer();
+// One persistent decode worker + its request/response plumbing. Two instances
+// exist (HEIC, TIFF). The worker is long-lived and processes many requests; a
+// per-request decode failure returns { ok:false } and does NOT poison it. Only
+// a hard worker 'error' (crash) discards it: every in-flight promise rejects
+// and the next decode() lazily respawns.
+class DecodeWorkerClient {
+  private readonly workerUri: string;
+  private worker: Worker | null = null;
+  // The fetched-and-wrapped bundle blob URL. Kept across respawns so a crash
+  // doesn't force a re-fetch of the (up to ~1.4 MB) worker bundle.
+  private blobUrl: string | null = null;
+  private booting: Promise<Worker> | null = null;
+  private nextId = 1;
+  private readonly pending = new Map<number, {
+    resolve: (r: DecodeResult) => void;
+    reject: (e: Error) => void;
+  }>();
 
-  const workerUrl = await getHeicWorkerBlobUrl();
-  const worker = new Worker(workerUrl);
-  let result: { rgba: Uint8ClampedArray; width: number; height: number };
-  try {
-    result = await new Promise<typeof result>((resolve, reject) => {
+  constructor(workerUri: string) {
+    this.workerUri = workerUri;
+  }
+
+  // Pending-request count — prefetch gates on this so a background pre-decode
+  // never front-runs (or piles up behind another decode on) the same worker.
+  get busy(): number {
+    return this.pending.size;
+  }
+
+  // Fire-and-forget spawn (bundle fetch + Worker creation) so a cold open can
+  // overlap it with the image-byte fetch instead of serializing after it.
+  // WASM init inside the worker stays lazy (first request), but the
+  // up-to-1.4 MB bundle fetch leaves the critical path. Arms the idle timer
+  // so a warm() with no follow-up decode still gets freed.
+  warm(): void {
+    this.boot()
+      .then(() => { if (this.pending.size === 0) this.armIdleTimer(); })
+      .catch(() => { /* next decode() retries and surfaces the error */ });
+  }
+
+  // Free the worker (and its WASM heap) after a quiet minute.
+  // retainContextWhenHidden keeps webviews alive in the background — without
+  // this, every webview that ever decoded a HEIC would pin a libheif instance
+  // forever. blobUrl survives, so the next decode respawns without re-fetching
+  // the bundle.
+  private idleTimer: number | null = null;
+  private clearIdleTimer(): void {
+    if (this.idleTimer != null) {
+      window.clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+  private armIdleTimer(): void {
+    this.clearIdleTimer();
+    this.idleTimer = window.setTimeout(() => {
+      this.idleTimer = null;
+      if (this.pending.size === 0 && this.worker) {
+        this.worker.terminate();
+        this.worker = null;
+      }
+    }, 60_000);
+  }
+
+  private boot(): Promise<Worker> {
+    if (this.worker) return Promise.resolve(this.worker);
+    if (this.booting) return this.booting;
+    const booting = (async () => {
+      // Same-origin blob trick: webview-resource URIs live on a different
+      // origin (*.vscode-cdn.net) than the page (vscode-webview://…), and
+      // new Worker(url) enforces same-origin. Fetch the bundle as text, wrap
+      // it in a Blob, and spawn from the blob URL — blob URLs inherit the page
+      // origin, so the same-origin check passes.
+      if (!this.blobUrl) {
+        const res = await fetch(this.workerUri);
+        if (!res.ok) throw new Error(`worker fetch ${res.status}`);
+        const src = await res.text();
+        this.blobUrl = URL.createObjectURL(
+          new Blob([src], { type: 'application/javascript' }),
+        );
+      }
+      const worker = new Worker(this.blobUrl);
       worker.onmessage = (e: MessageEvent) => {
         const d = e.data as
-          | { ok: true; rgba: Uint8ClampedArray; width: number; height: number; hasAlpha: boolean }
-          | { ok: false; error: string };
-        if (!d.ok) { reject(new Error(d.error)); return; }
-        resolve({ rgba: d.rgba, width: d.width, height: d.height });
+          | { id: number; ok: true; rgba: Uint8ClampedArray | Uint8Array; width: number; height: number; hasAlpha: boolean }
+          | { id: number; ok: false; error: string };
+        const entry = this.pending.get(d.id);
+        if (!entry) return;   // stale / already-settled id
+        this.pending.delete(d.id);
+        if (d.ok) entry.resolve({ rgba: d.rgba, width: d.width, height: d.height, hasAlpha: d.hasAlpha });
+        else entry.reject(new Error(d.error));
+        if (this.pending.size === 0) this.armIdleTimer();
       };
       worker.onerror = (ev: ErrorEvent) => {
-        // ErrorEvent fields are sparse for cross-origin / WASM failures.
-        // Concatenate what we have so the UI shows something useful.
+        // Hard crash (WASM abort, OOM, …). ErrorEvent fields are sparse for
+        // cross-origin workers, so concatenate whatever is present. Reject
+        // ALL in-flight requests and discard the worker — boot() respawns it
+        // on the next decode(). blobUrl is retained so we don't re-fetch.
         const detail =
           ev.message ||
           (ev.filename ? `${ev.filename}:${ev.lineno || '?'}` : '') ||
           'worker error';
-        reject(new Error(detail));
+        const err = new Error(detail);
+        for (const p of this.pending.values()) p.reject(err);
+        this.pending.clear();
+        this.clearIdleTimer();
+        if (this.worker === worker) this.worker = null;
+        worker.terminate();
       };
-      worker.postMessage({ buffer: buf }, [buf]);
-    });
-  } finally {
-    worker.terminate();
+      this.worker = worker;
+      return worker;
+    })();
+    this.booting = booting;
+    // Clear the boot latch on both settle paths: on success this.worker is set
+    // (fast path next time); on failure this.worker stays null so the next
+    // decode() retries the fetch+spawn.
+    booting.then(() => { this.booting = null; }, () => { this.booting = null; });
+    return booting;
   }
 
-  const canvas = document.createElement('canvas');
-  canvas.width = result.width;
-  canvas.height = result.height;
-  const cctx = canvas.getContext('2d');
-  if (!cctx) throw new Error('no canvas 2d ctx');
-  // Same ArrayBufferLike → ArrayBuffer cast as the TIFF path: the rgba
-  // came from libheif which allocates a regular ArrayBuffer.
-  const clamped = new Uint8ClampedArray(
-    result.rgba.buffer as ArrayBuffer,
-    result.rgba.byteOffset,
-    result.rgba.byteLength,
-  );
-  cctx.putImageData(new ImageData(clamped, result.width, result.height), 0, 0);
-  return new Promise<string>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (!blob) { reject(new Error('canvas.toBlob returned null')); return; }
-      resolve(URL.createObjectURL(blob));
-    }, 'image/png');
-  });
+  async decode(buffer: ArrayBuffer): Promise<DecodeResult> {
+    this.clearIdleTimer();
+    const worker = await this.boot();
+    const id = this.nextId++;
+    return new Promise<DecodeResult>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      // Transfer the request buffer in; the worker transfers RGBA back out.
+      worker.postMessage({ id, buffer }, [buffer]);
+    });
+  }
 }
 
-async function decodeTiffToBlobUrl(uri: string): Promise<string> {
-  const res = await fetch(uri);
-  if (!res.ok) throw new Error(`fetch ${res.status}`);
-  const buf = await res.arrayBuffer();
-  const ifds = UTIF.decode(buf);
-  if (!ifds.length) throw new Error('no IFDs in TIFF');
-  const ifd = ifds[0];
-  UTIF.decodeImage(buf, ifd);
-  const rgba = UTIF.toRGBA8(ifd);
-  const w = ifd.width;
-  const h = ifd.height;
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const cctx = canvas.getContext('2d');
-  if (!cctx) throw new Error('no canvas 2d ctx');
-  // The ArrayBufferLike → ArrayBuffer cast is safe: rgba came out of utif
-  // which allocates a regular ArrayBuffer (not SharedArrayBuffer). Going
-  // through the buffer + byteOffset slot avoids copying the full RGBA
-  // array (~4 × W × H bytes — easily 100 MB on a 24 MP file).
-  const clamped = new Uint8ClampedArray(
+const heicClient = new DecodeWorkerClient(ctx.heicWorkerUri);
+const tiffClient = new DecodeWorkerClient(ctx.tiffWorkerUri);
+
+function decoderClientFor(name: string): DecodeWorkerClient | null {
+  if (isTiffName(name)) return tiffClient;
+  if (isHeicName(name)) return heicClient;
+  return null;
+}
+
+function toClamped(rgba: Uint8ClampedArray | Uint8Array): Uint8ClampedArray<ArrayBuffer> {
+  // The worker allocates a plain ArrayBuffer (never SharedArrayBuffer), so the
+  // ArrayBufferLike → ArrayBuffer cast is safe and satisfies the ImageData
+  // constructor's element type (the explicit <ArrayBuffer> return keeps the
+  // buffer kind from widening back to ArrayBufferLike). Viewing through buffer
+  // + byteOffset avoids copying the full RGBA (~4·W·H bytes — 100 MB on a big
+  // TIFF).
+  return new Uint8ClampedArray(
     rgba.buffer as ArrayBuffer,
     rgba.byteOffset,
     rgba.byteLength,
   );
-  cctx.putImageData(new ImageData(clamped, w, h), 0, 0);
-  // toBlob is async; resolve with the object URL.
-  return new Promise<string>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (!blob) { reject(new Error('canvas.toBlob returned null')); return; }
-      resolve(URL.createObjectURL(blob));
-    }, 'image/png');
-  });
 }
 
-function freeCurrentBlobUrl(): void {
-  if (state.currentBlobUrl) {
-    URL.revokeObjectURL(state.currentBlobUrl);
-    state.currentBlobUrl = null;
+// --- Decoded-neighbor cache (TIFF/HEIC pre-decode) ---
+// Keyed by webview URI. Holds the foreground plus pre-decoded neighbors so ←/→
+// and slideshow swaps to a TIFF/HEIC paint from a cached bitmap instead of a
+// cold fetch+decode. Bounded two ways: at most DECODED_MAX_ENTRIES entries, and
+// at most DECODED_MAX_PIXELS total pixels (≈128 MB RGBA) — a single decode
+// larger than that budget is never cached at all.
+interface DecodedEntry {
+  bitmap: ImageBitmap;
+  w: number;
+  h: number;
+  hasAlpha: boolean;
+}
+const decodedCache = new Map<string, DecodedEntry>();
+const DECODED_MAX_ENTRIES = 2;
+const DECODED_MAX_PIXELS = 33_000_000;
+
+// fileUpdate cache-busted URIs (…?v=N / …&v=N) are one-shot: never cache or
+// prefetch them, and when a bust arrives evict the plain-URI entry — a
+// navigate-away-and-back must not repaint the pre-edit pixels.
+function isBustedUri(uri: string): boolean {
+  return /[?&]v=\d+$/.test(uri);
+}
+
+function evictDecoded(uri: string): void {
+  const entry = decodedCache.get(uri);
+  if (entry) {
+    entry.bitmap.close();
+    decodedCache.delete(uri);
   }
 }
 
-// Unified image loader. For most formats the URI goes straight to img.src;
-// for TIFF and HEIC we run a decode pipeline first that produces a PNG
-// blob URL. Either way, onImageReady fires once the image is actually
-// ready in <img> (load event) — this single entry point lets nav,
-// fileUpdate and the initial load share the gen-token race-handling.
+// In-flight decode registry. A foreground open whose uri is already being
+// pre-decoded RIDES that promise instead of posting a duplicate decode behind
+// it — without this, browsing faster than a decode completes made every swap
+// pay the full decode twice (prefetch + foreground, serialized on one worker).
+const inflightDecodes = new Map<string, Promise<void>>();
+
+function decodedPixelTotal(): number {
+  let total = 0;
+  for (const e of decodedCache.values()) total += e.w * e.h;
+  return total;
+}
+
+// URIs worth keeping decoded: the current image plus its immediate neighbors
+// (honoring browseLoop). The live currentUri is included too — it may be a
+// `?v=` cache-busted variant that isn't in ctx.siblings.
+function wantedDecodedUris(): Set<string> {
+  const wanted = new Set<string>();
+  if (state.currentUri) wanted.add(state.currentUri);
+  const n = ctx.siblings.length;
+  const cur = state.currentIndex;
+  const curSib = ctx.siblings[cur];
+  if (curSib) wanted.add(curSib.uri);
+  for (const dir of [-1, 1] as const) {
+    let idx = cur + dir;
+    if (idx < 0) idx = ctx.browseLoop ? n - 1 : -1;
+    else if (idx >= n) idx = ctx.browseLoop ? 0 : -1;
+    if (idx < 0 || idx === cur) continue;
+    const sib = ctx.siblings[idx];
+    if (sib) wanted.add(sib.uri);
+  }
+  return wanted;
+}
+
+// Drop decoded entries no longer current-or-neighbor, freeing their GPU-backed
+// bitmaps. Mirrors the native prefetchCache wanted-set eviction below.
+function pruneDecodedCache(): void {
+  const wanted = wantedDecodedUris();
+  for (const [key, entry] of [...decodedCache]) {
+    if (!wanted.has(key)) {
+      entry.bitmap.close();
+      decodedCache.delete(key);
+    }
+  }
+}
+
+// Try to retain a decoded result. Returns true ONLY if the cache took ownership
+// of *this* `bitmap` (caller must NOT close it); false means the caller still
+// owns `bitmap` and must close it after presenting. Prunes non-wanted entries
+// first so the current image can claim a freed slot.
+function retainDecoded(
+  uri: string, bitmap: ImageBitmap, w: number, h: number,
+  hasAlpha: boolean,
+): boolean {
+  // Already cached (e.g. a prefetch for this same uri landed first): keep the
+  // existing entry, hand ownership of this fresh duplicate back to the caller.
+  if (decodedCache.has(uri)) return false;
+  if (isBustedUri(uri)) return false;                // one-shot fileUpdate uri
+  if (w * h > DECODED_MAX_PIXELS) return false;      // oversized: never cache
+  pruneDecodedCache();
+  if (decodedCache.size >= DECODED_MAX_ENTRIES) return false;
+  if (decodedPixelTotal() + w * h > DECODED_MAX_PIXELS) return false;
+  decodedCache.set(uri, { bitmap, w, h, hasAlpha });
+  return true;
+}
+
+// Unified image loader. Native formats go straight to <img>.src; TIFF/HEIC go
+// through their decode worker onto <canvas>. Either way the settle sequence
+// (settleImage) runs once the pixels are actually up, so nav, fileUpdate and
+// the initial load all share one gen-token race guard.
 function loadImageInto(uri: string, name: string): void {
   state.loadGen += 1;
   const myGen = state.loadGen;
 
-  const onLoad = () => {
-    if (myGen !== state.loadGen) return;
-    state.tiffDecoding = false;
-    state.heicDecoding = false;
-    void onImageReady();
-  };
-  img.addEventListener('load', onLoad, { once: true });
-
-  // Pick a decoder for formats <img> can't render natively.
-  let decode: ((u: string) => Promise<string>) | null = null;
-  let label = '';
-  if (isTiffName(name)) {
-    state.tiffDecoding = true;
-    decode = decodeTiffToBlobUrl;
-    label = 'TIFF';
-  } else if (isHeicName(name)) {
-    state.heicDecoding = true;
-    decode = decodeHeicToBlobUrl;
-    label = 'HEIC';
+  const client = decoderClientFor(name);
+  if (client) {
+    const label = isTiffName(name) ? 'TIFF' : 'HEIC';
+    const cached = decodedCache.get(uri);
+    if (cached) {
+      // Cache hit — no fetch, no decode. The only work left at swap time is a
+      // single drawImage onto the canvas + the settle pass.
+      presentDecoded(cached.bitmap, cached.w, cached.h, cached.hasAlpha, myGen, /*retained*/ true);
+      return;
+    }
+    // Miss. Warm the worker now (bundle fetch + spawn) so it overlaps the
+    // image-byte fetch instead of serializing after it on a cold open.
+    client.warm();
+    // Blank the <img> (it carries no src for these formats) and mark it
+    // active so a canvas→canvas swap doesn't flash the previous decoded frame
+    // while the fetch+decode runs; presentDecoded flips back to the canvas.
+    img.removeAttribute('src');
+    state.presenting = 'img';
+    void decodeAndPresent(client, uri, label, myGen);
+    return;
   }
 
-  if (decode) {
-    // Stop the browser from chewing on the unsupported bytes — the inline
-    // src in the HTML triggers a load attempt the moment the page parses,
-    // and if we let it finish we'd get a flash of "failed to load" before
-    // the decoded blob takes over.
-    img.removeAttribute('src');
-    decode(uri).then((blobUrl) => {
-      if (myGen !== state.loadGen) {
-        URL.revokeObjectURL(blobUrl);
+  // Native format: <img> path.
+  const onLoad = () => {
+    if (myGen !== state.loadGen) return;
+    void settleImage(myGen, state.currentUri, state.filename);
+  };
+  img.addEventListener('load', onLoad, { once: true });
+  state.presenting = 'img';
+  img.src = uri;
+}
+
+// Fetch → worker-decode → ImageBitmap → present onto the canvas. Gen-guarded at
+// every await, so a fast ←/→ that supersedes this load discards the stale
+// result (closing the bitmap) instead of painting it. A per-decode failure
+// lands in the catch and shows the TL error card (+ advances the slideshow).
+async function decodeAndPresent(client: DecodeWorkerClient, uri: string, label: string, myGen: number): Promise<void> {
+  try {
+    // A background pre-decode of this exact uri may be mid-flight — ride it.
+    // When it lands in the cache, present from there; if it finished but
+    // couldn't cache (oversized / budget / failed), fall through to a decode
+    // of our own.
+    const inflight = inflightDecodes.get(uri);
+    if (inflight) {
+      await inflight;
+      if (myGen !== state.loadGen) return;
+      const cached = decodedCache.get(uri);
+      if (cached) {
+        presentDecoded(cached.bitmap, cached.w, cached.h, cached.hasAlpha, myGen, /*retained*/ true);
         return;
       }
-      freeCurrentBlobUrl();
-      state.currentBlobUrl = blobUrl;
-      img.src = blobUrl;
-    }).catch((err) => {
-      if (myGen !== state.loadGen) return;
-      console.warn(`[image-overlay] ${label} decode failed`, err);
-      state.tiffDecoding = false;
-      state.heicDecoding = false;
-      const detail = err instanceof Error ? err.message : String(err);
-      // Show the underlying error in the TL card too — without it the user
-      // has no signal beyond "didn't work" and we can't act on bug reports.
-      overlays.tl.innerHTML = `
-        <div class="title">${escapeHtml(state.filename)}</div>
-        <div class="meta dim">${label} decode failed</div>
-        <div class="meta dim" style="font-size:10px;opacity:0.7;word-break:break-word;">${escapeHtml(detail)}</div>`;
-      overlays.tl.classList.remove('empty');
-      // No 'load' event fires on a failed decode, so onImageReady won't run to
-      // pace the slideshow — reschedule here so a broken TIFF/HEIC doesn't
-      // stall the show forever on the image that never decoded.
-      if (state.slideshowOn) scheduleSlideshowTick();
-    });
-  } else {
-    // Switching to a natively-renderable format — release any previous
-    // decode blob URL so we don't leak.
-    freeCurrentBlobUrl();
-    img.src = uri;
+    }
+    const res = await fetch(uri);
+    if (!res.ok) throw new Error(`fetch ${res.status}`);
+    const buf = await res.arrayBuffer();
+    if (myGen !== state.loadGen) return;
+    const decoded = await client.decode(buf);
+    if (myGen !== state.loadGen) return;
+    const pixels = toClamped(decoded.rgba);
+    const bitmap = await createImageBitmap(new ImageData(pixels, decoded.width, decoded.height));
+    if (myGen !== state.loadGen) { bitmap.close(); return; }
+    // Retain first so a later revisit reuses this exact bitmap; if the budget
+    // rejects it we still present, then presentDecoded closes it after the draw.
+    const retained = retainDecoded(uri, bitmap, decoded.width, decoded.height, decoded.hasAlpha);
+    presentDecoded(bitmap, decoded.width, decoded.height, decoded.hasAlpha, myGen, retained);
+  } catch (err) {
+    if (myGen !== state.loadGen) return;   // superseded — stay silent
+    console.warn(`[image-overlay] ${label} decode failed`, err);
+    showDecodeError(label, err);
   }
 }
 
-async function onImageReady(): Promise<void> {
-  // Snapshot the generation and file identity up front. state.currentUri /
-  // state.filename can be reassigned by a navigate or fileUpdate that lands
-  // while we're mid-await, so we parse the file this call fired for and drop
-  // the whole result if a newer load has since bumped loadGen.
-  const myGen = state.loadGen;
-  const uri = state.currentUri;
-  const name = state.filename;
-  state.natural.w = img.naturalWidth;
-  state.natural.h = img.naturalHeight;
-  // Now that we know the image's natural dimensions, switch from CSS
-  // max-width/max-height to explicit pixel sizing — that's what avoids
-  // the GPU compositor tile-seam bug on big photos.
+// Draw a decoded bitmap onto the canvas and run the shared settle pass. Uses
+// drawImage (NOT transferFromImageBitmap, which would consume the bitmap and
+// break cache reuse). When `retained` is false the bitmap is a throwaway the
+// cache declined — close it right after the synchronous draw.
+function presentDecoded(
+  bitmap: ImageBitmap, w: number, h: number, hasAlpha: boolean,
+  myGen: number, retained: boolean,
+): void {
+  if (myGen !== state.loadGen) { if (!retained) bitmap.close(); return; }
+  canvas.width = w;
+  canvas.height = h;
+  const cctx = canvas.getContext('2d');
+  if (!cctx) {
+    if (!retained) bitmap.close();
+    showDecodeError('decode', new Error('no canvas 2d ctx'));
+    return;
+  }
+  cctx.drawImage(bitmap, 0, 0);
+  if (!retained) bitmap.close();
+  // Worker's full-res hasAlpha is authoritative; natural dims come from the
+  // decode, not from any <img>. presenting flips to canvas so activeEl(), the
+  // sampler and the histogram all target it.
+  state.natural.w = w;
+  state.natural.h = h;
+  state.hasAlpha = hasAlpha;
+  state.presenting = 'canvas';
+  void settleImage(myGen, state.currentUri, state.filename);
+}
+
+function showDecodeError(label: string, err: unknown): void {
+  const detail = err instanceof Error ? err.message : String(err);
+  // Surface the underlying message in the TL card — without it a bug report
+  // has no signal beyond "didn't work".
+  overlays.tl.innerHTML = `
+    <div class="title">${escapeHtml(state.filename)}</div>
+    <div class="meta dim">${label} decode failed</div>
+    <div class="meta dim" style="font-size:10px;opacity:0.7;word-break:break-word;">${escapeHtml(detail)}</div>`;
+  overlays.tl.classList.remove('empty');
+  // No settle runs on a failed decode, so pace the slideshow from here or a
+  // broken file would stall the show forever on the image that never decoded.
+  if (state.slideshowOn) scheduleSlideshowTick();
+}
+
+// Shared settle pass — the single sequence both the <img> 'load' listener and
+// the canvas decode path funnel into, so gen semantics are identical for native
+// and decoder formats. myGen / uri / name are snapshotted by the caller at the
+// moment the pixels became ready; a newer navigate that bumped loadGen drops
+// this whole result at the gen check below.
+async function settleImage(myGen: number, uri: string, name: string): Promise<void> {
+  // Natural dims: the <img> path reads them off the element now; the canvas
+  // path already set state.natural in presentDecoded from the decode result.
+  if (state.presenting === 'img') {
+    state.natural.w = img.naturalWidth;
+    state.natural.h = img.naturalHeight;
+  }
+  // Now that natural dimensions are known, switch from CSS max-width/max-height
+  // to explicit pixel sizing — that's what avoids the GPU tile-seam bug.
   applyTransform();
   await analyzeImageSample();
   render();
@@ -934,8 +1158,10 @@ function setHistCanvasSize(): void {
 }
 
 async function computeHistogram(myGen: number): Promise<HistData | null> {
-  const w = img.naturalWidth;
-  const h = img.naturalHeight;
+  // Dimensions from state.natural, which is authoritative for both surfaces
+  // (a <canvas> has no naturalWidth). activeEl() feeds the pixel source below.
+  const w = state.natural.w;
+  const h = state.natural.h;
   if (!w || !h) return null;
 
   // --- Path A (preferred): createImageBitmap → Worker w/ OffscreenCanvas.
@@ -946,7 +1172,7 @@ async function computeHistogram(myGen: number): Promise<HistData | null> {
   // the feature-checks here are belt-and-suspenders.
   if (typeof createImageBitmap === 'function' && typeof OffscreenCanvas !== 'undefined') {
     try {
-      const bitmap = await createImageBitmap(img);
+      const bitmap = await createImageBitmap(activeEl());
       if (myGen !== histState.gen) { bitmap.close(); return null; }
       return await runHistogramWorker(
         { bitmap, width: w, height: h },
@@ -963,12 +1189,12 @@ async function computeHistogram(myGen: number): Promise<HistData | null> {
   // but still better than counting on the main thread.
   let imgData: ImageData;
   try {
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const cctx = canvas.getContext('2d', { willReadFrequently: false });
+    const scratch = document.createElement('canvas');
+    scratch.width = w;
+    scratch.height = h;
+    const cctx = scratch.getContext('2d', { willReadFrequently: false });
     if (!cctx) return null;
-    cctx.drawImage(img, 0, 0);
+    cctx.drawImage(activeEl(), 0, 0);
     imgData = cctx.getImageData(0, 0, w, h);
   } catch (err) {
     console.warn('[image-overlay] histogram: canvas/getImageData failed', err);
@@ -1171,7 +1397,7 @@ function toggleHistogram(): void {
 }
 
 // If the host says histogram should be on at startup, seed the panel
-// immediately. The actual scan happens later inside onImageReady once the
+// immediately. The actual scan happens later inside settleImage once the
 // natural size is known.
 if (histState.on) {
   setHistCanvasSize();
@@ -1193,38 +1419,43 @@ window.addEventListener('resize', () => {
   });
 });
 
-// Initial load. If we already opened a TIFF or HEIC the inline <img src=...>
-// in the HTML kicked off a doomed load — re-route via the right decoder.
-// For natively-supported formats, if the inline src already finished
-// loading by the time JS runs, fast-path straight into onImageReady;
-// otherwise wait for it.
+// Initial load. TIFF/HEIC route through loadImageInto's decoder path onto the
+// canvas (the provider emits no <img> src for them). For natively-supported
+// formats, if the inline src already finished loading by the time JS runs,
+// fast-path straight into the settle pass; otherwise wait for the load event.
 if (isTiffName(state.filename) || isHeicName(state.filename)) {
   loadImageInto(state.currentUri, state.filename);
 } else {
   state.loadGen += 1;
   const initGen = state.loadGen;
+  state.presenting = 'img';
   if (img.complete && img.naturalWidth > 0) {
-    void onImageReady();
+    void settleImage(initGen, state.currentUri, state.filename);
   } else {
     img.addEventListener('load', () => {
       if (initGen !== state.loadGen) return;
-      void onImageReady();
+      void settleImage(initGen, state.currentUri, state.filename);
     }, { once: true });
   }
 }
 
 img.addEventListener('error', () => {
-  // Suppress the inline-load error event that fires when the browser tries
-  // to render TIFF / HEIC natively — we route those through their decoders
-  // and report real failures from inside loadImageInto's catch.
-  if (state.tiffDecoding || state.heicDecoding) return;
+  // The <img> only ever carries a src for natively-renderable formats now —
+  // TIFF/HEIC decode straight to <canvas> and the <img> stays src-less, so it
+  // never fires a spurious error for them. If the canvas is the live surface,
+  // this is a stale event from a prior native src — ignore it.
+  if (state.presenting !== 'img') return;
+  // During a TIFF/HEIC fetch+decode the canvas isn't live yet (presenting is
+  // briefly 'img' with a blanked src), so an abort-error from the previous
+  // native src can still land here. Those formats report real failures via
+  // showDecodeError, never this handler.
   if (isTiffName(state.filename) || isHeicName(state.filename)) return;
   overlays.tl.innerHTML = `
     <div class="title">${escapeHtml(state.filename)}</div>
     <div class="meta dim">failed to load preview</div>`;
   overlays.tl.classList.remove('empty');
-  // Same slideshow-stall guard as the decode catch: a broken native-format
-  // image never reaches onImageReady, so keep the show moving from here.
+  // A broken native-format image never reaches the settle pass, so keep the
+  // slideshow moving from here.
   if (state.slideshowOn) scheduleSlideshowTick();
 });
 
@@ -1367,11 +1598,21 @@ window.addEventListener('keydown', (e) => {
 // neighbors are always read from ctx.siblings, which holds the plain URIs.
 const prefetchCache = new Map<string, HTMLImageElement>();
 
+// True once the user has actually moved within THIS webview (←/→ or
+// slideshow). Explorer-click usage opens a fresh webview per image and never
+// navigates inside it — kicking background TIFF/HEIC pre-decodes there (each
+// booting its own WASM instance per webview) is pure waste, and made
+// unrelated JPG opens feel sluggish in mixed folders.
+let hasNavigatedThisView = false;
+
 function schedulePrefetch(): void {
   if (ctx.siblings.length <= 1) return;
   const n = ctx.siblings.length;
   const cur = state.currentIndex;
-  const wanted: string[] = [];
+  const wantedNative: string[] = [];
+  // Decoder neighbors carry their direction so we can attempt +1 before -1 —
+  // forward browsing / slideshow then wins the (budget-limited) decode slot.
+  const decoderNeighbors: Array<{ uri: string; name: string; dir: number }> = [];
   for (const dir of [-1, 1] as const) {
     let idx = cur + dir;
     if (idx < 0) idx = ctx.browseLoop ? n - 1 : -1;
@@ -1379,10 +1620,13 @@ function schedulePrefetch(): void {
     if (idx < 0 || idx === cur) continue;   // out of range (no loop) or wrapped onto self
     const sib = ctx.siblings[idx];
     if (!sib) continue;
-    // TIFF/HEIC don't render through <img> — a plain Image() can't warm them
-    // (they need the decode worker), so skip rather than cache a broken load.
-    if (isTiffName(sib.name) || isHeicName(sib.name)) continue;
-    wanted.push(sib.uri);
+    if (isTiffName(sib.name) || isHeicName(sib.name)) {
+      // TIFF/HEIC can't warm through a plain Image() — they get a background
+      // pre-decode into decodedCache below instead.
+      decoderNeighbors.push({ uri: sib.uri, name: sib.name, dir });
+      continue;
+    }
+    wantedNative.push(sib.uri);
     if (!prefetchCache.has(sib.uri)) {
       const im = new Image();
       im.decoding = 'async';
@@ -1392,11 +1636,75 @@ function schedulePrefetch(): void {
       prefetchCache.set(sib.uri, im);
     }
   }
-  // Evict entries that are no longer an immediate neighbor. Plain delete is
-  // enough — these are webview-resource URIs, not blob: URLs, so there's no
+  // Evict native entries that are no longer an immediate neighbor. Plain delete
+  // is enough — these are webview-resource URIs, not blob: URLs, so there's no
   // object URL to revoke.
   for (const key of prefetchCache.keys()) {
-    if (!wanted.includes(key)) prefetchCache.delete(key);
+    if (!wantedNative.includes(key)) prefetchCache.delete(key);
+  }
+
+  // Decoded (TIFF/HEIC) neighbors: prune non-wanted first (frees a slot the
+  // current image or a neighbor can reuse), then top up within budget — but
+  // only once the user has navigated in this webview, or when the current
+  // image itself is a decoder format (browsing/slideshow through HEICs
+  // should start warm immediately).
+  pruneDecodedCache();
+  const decodePrefetchActive = hasNavigatedThisView ||
+    isTiffName(state.filename) || isHeicName(state.filename);
+  if (!decodePrefetchActive) return;
+  decoderNeighbors.sort((a, b) => b.dir - a.dir);   // +1 (next) before -1 (prev)
+  for (const nb of decoderNeighbors) {
+    if (decodedCache.has(nb.uri)) continue;
+    if (decodedCache.size >= DECODED_MAX_ENTRIES) break;   // no room
+    // Busted `?v=` URIs only ever apply to the current image, never a
+    // neighbor — but guard anyway so a pre-decode never fires against one.
+    if (isBustedUri(nb.uri)) continue;
+    const client = decoderClientFor(nb.name);
+    if (!client) continue;
+    // Never start a prefetch decode while a decode is already in flight on
+    // this worker — a background pre-decode must not front-run a foreground
+    // open. If a foreground swap arrives AFTER we've started, it rides our
+    // in-flight promise via inflightDecodes instead of double-decoding.
+    if (client.busy > 0) continue;
+    void prefetchDecode(client, nb.uri);
+  }
+}
+
+// Background pre-decode of a TIFF/HEIC neighbor into decodedCache. Budget is
+// re-checked post-decode (the real pixel count is only known then) and again
+// after the async bitmap build, so a race with a foreground present can't push
+// the cache past its caps. Failures are swallowed like native prefetch misses.
+async function prefetchDecode(client: DecodeWorkerClient, uri: string): Promise<void> {
+  if (inflightDecodes.has(uri)) return;
+  const job = doPrefetchDecode(client, uri);
+  inflightDecodes.set(uri, job);
+  try { await job; } finally { inflightDecodes.delete(uri); }
+}
+
+async function doPrefetchDecode(client: DecodeWorkerClient, uri: string): Promise<void> {
+  try {
+    const res = await fetch(uri);
+    if (!res.ok) return;
+    const buf = await res.arrayBuffer();
+    const decoded = await client.decode(buf);
+    if (decodedCache.has(uri)) return;                        // raced a foreground present
+    const area = decoded.width * decoded.height;
+    // Don't even build the bitmap if it can't be cached.
+    if (area > DECODED_MAX_PIXELS) return;                    // oversized: never cache
+    if (decodedCache.size >= DECODED_MAX_ENTRIES) return;
+    if (decodedPixelTotal() + area > DECODED_MAX_PIXELS) return;
+    const pixels = toClamped(decoded.rgba);
+    const bitmap = await createImageBitmap(new ImageData(pixels, decoded.width, decoded.height));
+    // Post-await recheck — a foreground decode may have filled a slot meanwhile.
+    if (decodedCache.has(uri) ||
+        decodedCache.size >= DECODED_MAX_ENTRIES ||
+        decodedPixelTotal() + area > DECODED_MAX_PIXELS) {
+      bitmap.close();
+      return;
+    }
+    decodedCache.set(uri, { bitmap, w: decoded.width, h: decoded.height, hasAlpha: decoded.hasAlpha });
+  } catch {
+    // Broken / aborted neighbor — ignore, exactly like a native prefetch failure.
   }
 }
 
@@ -1422,6 +1730,7 @@ function navigate(direction: -1 | 1, manual: boolean): void {
 function swapTo(idx: number): void {
   const sib = ctx.siblings[idx];
   if (!sib) return;
+  hasNavigatedThisView = true;
   state.currentIndex = idx;
   state.filename = sib.name;
   state.fileSize = sib.size;
@@ -1438,7 +1747,7 @@ function swapTo(idx: number): void {
   state.exif = null;
   // Same for alpha — the file card's RGB/RGBA line is derived from
   // state.hasAlpha, so drop it too or the previous image's channel count
-  // flashes until the merged sampler recomputes it in onImageReady.
+  // flashes until the settle pass recomputes it (or the decoder sets it).
   state.hasAlpha = null;
   // loadImageInto bumps state.loadGen and wires the load handler with the
   // race-safe gen check; works for both regular images and TIFF.
@@ -1471,12 +1780,12 @@ function stopSlideshow(): void {
 function scheduleSlideshowTick(): void {
   // Always clear any pending timer first, so every scheduling path (first
   // tick, per-image settle, speed change, a manual ←/→ that lands its own
-  // onImageReady) collapses to a single live timer — no parallel chains.
+  // settle) collapses to a single live timer — no parallel chains.
   if (slideshowTimer != null) clearTimeout(slideshowTimer);
   slideshowTimer = window.setTimeout(() => {
     if (!state.slideshowOn) return;
     // Advance one image and stop — deliberately NOT self-rescheduling. The
-    // next tick is armed from wherever this swap settles (onImageReady after
+    // next tick is armed from wherever this swap settles (settleImage after
     // its gen check, or a decode/error handler for a broken file), so an
     // interval shorter than decode time can't skip past images that never
     // actually displayed.
@@ -1514,6 +1823,11 @@ window.addEventListener('message', (ev) => {
     state.fileSize = msg.fileSize;
     state.mtime = msg.mtime;
     const bust = `${ctx.imageUri}${ctx.imageUri.includes('?') ? '&' : '?'}v=${msg.cacheBust}`;
+    // The file changed on disk — a decoded bitmap cached under the plain URI
+    // would repaint the PRE-edit pixels on the next navigate-back. Evict it
+    // (busted URIs themselves never enter the cache).
+    evictDecoded(ctx.imageUri);
+    evictDecoded(state.currentUri);
     state.currentUri = bust;
     state.exif = null;
     loadImageInto(bust, state.filename);

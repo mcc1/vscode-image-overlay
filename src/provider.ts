@@ -14,6 +14,14 @@ const SUPPORTED_EXTS: ReadonlySet<string> = new Set([
   '.tiff', '.tif', '.heic', '.heif', '.ico', '.svg',
 ]);
 
+// Formats decoded off the main <img> pipeline (utif / libheif-js worker)
+// instead of native <img> decode. buildHtml omits <img src> for these —
+// emitting it would start a doomed native-decode attempt that main.ts
+// immediately aborts and re-fetches from scratch, reading the file twice.
+const DEFERRED_DECODE_EXTS: ReadonlySet<string> = new Set([
+  '.tiff', '.tif', '.heic', '.heif',
+]);
+
 interface SiblingItem {
   fsPath: string;
   uri: string;       // webview-uri string, ready to drop into <img src>
@@ -286,8 +294,22 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     const heicWorkerUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'heic-worker.js')
     );
+    // Same idea — lazy-loaded by main.ts only when a TIFF/TIF file is opened.
+    const tiffWorkerUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'tiff-worker.js')
+    );
     const cspSource = webview.cspSource;
     const nonce = getNonce();
+
+    // TIFF/HEIC/HEIF are decoded by a worker (utif / libheif-js) into a
+    // blob URL rather than rendered natively — see DEFERRED_DECODE_EXTS.
+    // Provider already knows the opened file's extension, so it can skip
+    // emitting <img src> for those formats instead of letting main.ts
+    // start-then-abort a native decode of bytes it can't use.
+    const ext = path.extname(imageUri.fsPath).toLowerCase();
+    const imgTag = DEFERRED_DECODE_EXTS.has(ext)
+      ? `<img id="img" alt="" draggable="false">`
+      : `<img id="img" src="${imageWebUri}" alt="" draggable="false">`;
 
     const injectedCtx = {
       filename: ctx.filename,
@@ -311,6 +333,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       slideshowIntervalMs: ctx.slideshowIntervalMs,
       histogramOn: ctx.histogramOn,
       heicWorkerUri: heicWorkerUri.toString(),
+      tiffWorkerUri: tiffWorkerUri.toString(),
     };
 
     return `<!DOCTYPE html>
@@ -323,7 +346,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
 </head>
 <body>
   <div id="stage">
-    <div id="img-wrap"><img id="img" src="${imageWebUri}" alt="" draggable="false"></div>
+    <div id="img-wrap">${imgTag}</div>
   </div>
   <div id="overlay-tl" class="overlay corner tl"></div>
   <div id="overlay-tr" class="overlay corner tr"></div>

@@ -84,8 +84,8 @@ shows metadata as small floating cards anchored in fixed corners.
 | --- | --- | --- |
 | PNG / JPG / GIF / BMP / WebP / AVIF / ICO | `<img>` (native) | Whatever Chromium can decode shows up immediately. |
 | SVG | `<img>` (native) | |
-| TIFF / TIF | [`utif`](https://github.com/photopea/UTIF.js) (~30 KB) | Decoded client-side, blob-URL'd into `<img>`. First IFD only. |
-| HEIC / HEIF | [`libheif-js`](https://github.com/catdad-experiments/libheif-js) Web Worker (~1.4 MB, lazy) | The decoder bundle is fetched only the first time a HEIC opens. |
+| TIFF / TIF | [`utif`](https://github.com/photopea/UTIF.js) Web Worker (~84 KB, lazy) | Decoded off the main thread, drawn straight to canvas. First IFD only. |
+| HEIC / HEIF | [`libheif-js`](https://github.com/catdad-experiments/libheif-js) Web Worker (~1.4 MB, lazy) | Persistent worker — WASM loads once per viewer, and ←/→ neighbors are pre-decoded for instant browsing. |
 | RAW (CR2/NEF/ARW/DNG…) | — | Out of scope; would need a per-vendor decoder. EXIF metadata still parses. |
 | JPEG XL | — | Out of scope. |
 

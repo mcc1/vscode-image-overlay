@@ -41,16 +41,30 @@ const heicWorkerConfig = {
   target: 'es2020',
 };
 
+// TIFF decode worker — small bundle (utif is ~30 KB), same persistent
+// multi-request protocol as the HEIC worker. Loaded by main.ts via
+// `new Worker(asWebviewUri(dist/tiff-worker.js))`.
+const tiffWorkerConfig = {
+  ...shared,
+  entryPoints: ['src/webview/tiff-worker.ts'],
+  outfile: 'dist/tiff-worker.js',
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2020',
+};
+
 if (watch) {
   const ctx1 = await esbuild.context(extensionConfig);
   const ctx2 = await esbuild.context(webviewConfig);
   const ctx3 = await esbuild.context(heicWorkerConfig);
-  await Promise.all([ctx1.watch(), ctx2.watch(), ctx3.watch()]);
+  const ctx4 = await esbuild.context(tiffWorkerConfig);
+  await Promise.all([ctx1.watch(), ctx2.watch(), ctx3.watch(), ctx4.watch()]);
   console.log('[esbuild] watching…');
 } else {
   await Promise.all([
     esbuild.build(extensionConfig),
     esbuild.build(webviewConfig),
     esbuild.build(heicWorkerConfig),
+    esbuild.build(tiffWorkerConfig),
   ]);
 }

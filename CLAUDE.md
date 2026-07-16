@@ -42,19 +42,19 @@ competitors compress the image; corner overlays don't.
     so the expanded EXIF panel's larger footprint is handled correctly.
 - `media/viewer.css` — glass-style overlay styling; uses VS Code theme variables
   as the page background but keeps overlay colors fixed for image readability.
-- `src/webview/heic-worker.ts` — separate Web Worker for HEIC/HEIF decode.
-  Bundles `libheif-js/wasm-bundle` (~1.4 MB with WASM as base64). Lives in
-  its own esbuild entry so `dist/heic-worker.js` is fetched only when the
-  user actually opens a `.heic` / `.heif` file. Main thread spawns it via
-  `new Worker(ctx.heicWorkerUri)`, transfers the file's ArrayBuffer in,
-  receives RGBA pixels back via Transferable.
-- `media/viewer.css` — glass-style overlay styling; uses VS Code theme variables
-  as the page background but keeps overlay colors fixed for image readability.
-- `esbuild.mjs` — three entrypoints: extension (node/cjs, `vscode` external),
-  webview (browser/iife, bundles exifr + utif), and the HEIC worker (browser/
-  iife, bundles libheif-js). The histogram worker is **not** a separate
-  entrypoint — its source is a string inlined in main.ts and loaded via
-  `Blob` URL.
+- `src/webview/heic-worker.ts` / `src/webview/tiff-worker.ts` — persistent
+  decode Web Workers (HEIC via `libheif-js/wasm-bundle` ~1.4 MB; TIFF via
+  `utif`+pako ~84 KB min). Own esbuild entries, fetched lazily on first use
+  of the format, then kept alive for the webview's lifetime — request-id
+  protocol `{id,buffer} → {id,ok,rgba,width,height,hasAlpha}`, per-request
+  error isolation, libheif image handles freed per request (they'd leak in
+  a persistent worker otherwise). Main thread talks to them through
+  `DecodeWorkerClient` (bundle fetched as text → Blob → `new Worker`, the
+  same-origin trick; crash ⇒ reject-all-pending + lazy respawn).
+- `esbuild.mjs` — four entrypoints: extension (node/cjs, `vscode` external),
+  webview (browser/iife, bundles exifr), and the two decode workers
+  (browser/iife). The histogram worker is **not** a separate entrypoint —
+  its source is a string inlined in main.ts and loaded via `Blob` URL.
 - `.github/workflows/release.yml` — tag-driven CI that builds the vsix and
   attaches it to a GitHub release. See **Release process** below.
 
@@ -177,15 +177,18 @@ double-check the live version.
 
 | Format | Renderer | Where in code |
 | --- | --- | --- |
-| PNG / JPG / GIF / BMP / WebP / AVIF / ICO / SVG | `<img>` native | `loadImageInto` non-decoder branch |
-| TIFF / TIF | `utif` (~30 KB, eagerly bundled into viewer.js) | `decodeTiffToBlobUrl` in main.ts |
-| HEIC / HEIF | `libheif-js` Web Worker (~1.4 MB, lazy chunk) | `decodeHeicToBlobUrl` + heic-worker.ts |
+| PNG / JPG / GIF / BMP / WebP / AVIF / ICO / SVG | `<img>` native | `loadImageInto` native branch |
+| TIFF / TIF | `utif` Web Worker (~84 KB min, lazy chunk incl. pako) | `tiff-worker.ts` + `DecodeWorkerClient` in main.ts |
+| HEIC / HEIF | `libheif-js` Web Worker (~1.4 MB, lazy chunk) | `heic-worker.ts` + `DecodeWorkerClient` in main.ts |
 
-Decoded images go through the same blob-URL → `<img>.src` path so the rest
-of the viewer (corner luminance, EXIF parse, histogram) doesn't care which
-decoder produced the pixels. EXIF parsing via exifr works on
-JPG / TIFF / HEIC / WebP regardless of whether the `<img>` could render it
-without help.
+Both decode workers are **persistent** (spawned once per webview, request-id
+multiplexed, `{id,buffer} → {id,ok,rgba,width,height,hasAlpha}`), so libheif's
+WASM instantiates once, not per image. Decoded RGBA is presented **directly on
+a `<canvas>`** (no PNG re-encode → `<img>` re-decode round-trip); `activeEl()`
+abstracts img-vs-canvas for every pixel consumer (corner/alpha sampling,
+histogram, applyTransform). Neighbor prefetch pre-decodes TIFF/HEIC into an
+ImageBitmap cache (≤2 entries, ≤33 M total pixels, closed on evict). EXIF
+parsing via exifr works on JPG / TIFF / HEIC / WebP regardless of renderer.
 
 ### HDR / color space surfacing
 - ICC profile parse is enabled (`icc: true` in the exifr call) so the
@@ -257,14 +260,6 @@ Roadmap is open. See backlog below for candidate items.
       keys, would need a different chord.
 - [ ] PSD composite preview via `ag-psd`. Same lazy-worker shape as
       HEIC. Niche but small effort.
-- [ ] Perf 方案 B — TIFF decode into a worker (mirror heic-worker's shape),
-      keep the HEIC worker/WASM instance alive between decodes (today it
-      re-instantiates per image), and stop emitting the doomed inline
-      `<img src>` for TIFF/HEIC (whole file read twice).
-- [ ] Perf 方案 C — present decoded TIFF/HEIC on a canvas to skip the
-      RGBA → PNG encode → `<img>` re-decode round-trip. Touches every
-      consumer that reads `img` (corners, alpha, histogram); only worth it
-      for heavy large-TIFF/HEIC use.
 
 **Likely never**
 - [ ] HDR-aware histogram. Canvas2D readback is 8-bit sRGB regardless
@@ -278,6 +273,15 @@ Roadmap is open. See backlog below for candidate items.
 ### Known weirdness (not yet investigated / not fixed)
 - VS Code side-by-side diff mode probably won't activate the custom
   editor (untested) — VS Code limitation, may be OK to ignore.
+- The live-refresh watcher tracks only the ORIGINALLY-opened file:
+  navigate to a sibling with ←/→ and overwrite THAT file on disk — no
+  refresh (the fileUpdate handler even deliberately ignores it while
+  navigated away). onDidDelete is also unwired: a deleted file keeps
+  showing its last state. Both small, both by-design-ish since 0.1.x.
+- XMP-only GPS (some tools write GPS into XMP instead of the EXIF GPS
+  IFD) doesn't surface — exifr only populates `latitude`/`longitude`
+  from the GPS IFD. Surfaced 2026-07-16 while diagnosing a "GPS missing"
+  report (that one turned out to be stripped EXIF, not this).
 
 ## Competitive context (as of 2026-04)
 | Extension | Display | Installs | Gap we fill |
