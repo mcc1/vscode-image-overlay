@@ -246,6 +246,18 @@ Roadmap is open. See backlog below for candidate items.
 
 ### Backlog (no version pinned)
 
+**Bugs / issues (small, verified, low urgency)**
+- [ ] LOW heic-worker: `currentId` mis-attribution is reachable — foreground
+      `decodeAndPresent` has no busy gate (only prefetch does), so one worker
+      can hold two in-flight requests; if a DEFERRED libheif crash lands in
+      that window, the global error guard answers the wrong id and the other
+      request's promise dangles (worker survives). Fix: id→handle map in the
+      worker, or queue foreground decodes client-side. Found by the 0.3.6
+      verification pass; latent, happy path unaffected.
+- [ ] LOW histogram of images beyond the 16,384px canvas axis clamp samples
+      the downscaled canvas, not full resolution (accepted trade-off from the
+      clamp fix — such images couldn't display at all before).
+
 **Polish**
 - [ ] Marketplace listing screenshots / a short animated GIF.
       User has to capture them; tooling pointer is ScreenToGif on Win.

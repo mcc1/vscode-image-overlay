@@ -110,7 +110,7 @@ for `nclx` / `cICP`.
 | <kbd>[</kbd> / <kbd>]</kbd> | Slideshow slower / faster |
 | scroll | Zoom |
 | drag | Pan |
-| <kbd>Ctrl+Shift+I</kbd> | Toggle overlay (works without focusing image) |
+| <kbd>Ctrl+Alt+I</kbd> (<kbd>Cmd+Alt+I</kbd> on macOS) | Toggle overlay (works without focusing image) |
 
 ## Settings
 

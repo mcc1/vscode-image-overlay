@@ -170,7 +170,11 @@ export function describeCaptureExtras(e: Record<string, unknown>): string[] {
   const metering = pick<string>(e, 'MeteringMode');
   const meteringStr = typeof metering === 'string' && metering !== 'Unknown' ? metering : '';
   const evc = pick<number>(e, 'ExposureBiasValue', 'ExposureCompensation');
-  const evcStr = typeof evc === 'number' && evc !== 0 ? `${evc > 0 ? '+' : ''}${evc} EV` : '';
+  // Number.isFinite guards corrupt EXIF rationals (e.g. a 0/0 divide inside
+  // the parser) — evc !== 0 alone doesn't exclude NaN, since NaN !== 0 is
+  // true, which used to render the literal string "NaN EV".
+  const evcStr = typeof evc === 'number' && Number.isFinite(evc) && evc !== 0
+    ? `${evc > 0 ? '+' : ''}${evc} EV` : '';
 
   const extras = [wbStr, flashStr, meteringStr, evcStr].filter(Boolean);
   if (extras.length) lines.push(extras.join(' · '));

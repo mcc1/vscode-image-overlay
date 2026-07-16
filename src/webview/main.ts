@@ -9,6 +9,8 @@ import {
   mapUrl, computeMapView,
 } from './lib/format.js';
 import { enrichFromBytes } from './lib/format-enrich.js';
+import { isBustedUri, wantedDecodedUris as computeWantedDecodedUris } from './lib/browse.js';
+import { computeDisplaySize } from './lib/transform.js';
 
 interface SiblingItem {
   uri: string;
@@ -76,6 +78,21 @@ const overlays: Record<CornerKey, HTMLElement> = {
   bl: document.getElementById('overlay-bl')!,
   br: document.getElementById('overlay-br')!,
 };
+
+// A11y: each corner is an ARIA note with a stable label describing its role.
+// Set once here (not per render) — the content changes every image, but what
+// the slot IS ("Capture info", …) never does, so a screen reader gets a fixed
+// landmark instead of a re-announced blob.
+const OVERLAY_ARIA_LABELS: Record<CornerKey, string> = {
+  tl: 'Capture info',
+  bl: 'File info',
+  tr: 'Location',
+  br: 'Zoom level',
+};
+for (const key of Object.keys(overlays) as CornerKey[]) {
+  overlays[key].setAttribute('role', 'note');
+  overlays[key].setAttribute('aria-label', OVERLAY_ARIA_LABELS[key]);
+}
 
 const state = {
   visible: ctx.defaultVisible,
@@ -216,6 +233,12 @@ function renderMapThumb(lat: number, lon: number, linkUrl: string | null, label:
     : ctx.gpsMapProvider === 'apple' ? 'Apple Maps'
     : 'OpenStreetMap';
   const view = computeMapView(lat, lon, 13, 200, 130);
+  // Near the poles (|lat| ≳ 85°) the slippy-tile math produces no in-range
+  // tiles, so the map box would render empty. Fall back to the same coord-only
+  // line the gpsMapProvider==='none' branch shows, rather than a blank card.
+  if (view.tiles.length === 0) {
+    return `<div class="meta dim">◎ ${escapeHtml(label)}</div>`;
+  }
   const tiles = view.tiles.map((t) =>
     `<img class="map-tile" src="${escapeAttr(t.url)}" style="left:${t.left}px;top:${t.top}px" alt="" aria-hidden="true" />`
   ).join('');
@@ -237,7 +260,9 @@ function renderMapThumb(lat: number, lon: number, linkUrl: string | null, label:
 function buildFileHtml(): string {
   const { w, h } = state.natural;
   const e = state.exif || {};
-  const ext = getExt(state.filename);
+  // Escaped at the source: ext is interpolated raw into two innerHTML lines
+  // below, and a crafted filename ("evil.<svg …>") makes getExt return markup.
+  const ext = escapeHtml(getExt(state.filename));
   const lines: string[] = [];
   lines.push(`<div class="title" title="${escapeHtml(state.filename)}">${escapeHtml(state.filename)}</div>`);
   if (w && h) {
@@ -274,8 +299,10 @@ function buildFileHtml(): string {
   ].filter(Boolean).join(' · ');
   if (attribution) lines.push(`<div class="meta dim">${attribution}</div>`);
 
-  // Position counter — only when more than one image to browse through.
-  if (ctx.siblings.length > 1) {
+  // Position counter — only when more than one image to browse through, and
+  // only once we have a real anchor. currentIndex can be -1 (the opened file
+  // isn't in the sibling list — deleted/filtered), and "0 / M" would be a lie.
+  if (ctx.siblings.length > 1 && state.currentIndex >= 0) {
     lines.push(`<div class="meta dim browse-pos">${state.currentIndex + 1} / ${ctx.siblings.length}</div>`);
   }
 
@@ -288,21 +315,25 @@ function buildCaptureHtml(): string {
   const model = pick<string>(e, 'Model');
   const camera = [make, model].filter(Boolean).join(' ').trim();
   const lens = pick<string>(e, 'LensModel', 'Lens', 'LensInfo');
-  const iso = pick<number>(e, 'ISO', 'ISOSpeedRatings');
-  const fnum = pick<number>(e, 'FNumber', 'ApertureValue');
   const shutter = fmtExposure(pick(e, 'ExposureTime'));
-  const focal = pick<number>(e, 'FocalLength');
-  const focal35 = pick<number>(e, 'FocalLengthIn35mmFormat');
-  const focalStr = focal
-    ? focal35 && Math.round(focal35) !== Math.round(focal)
-      ? `${Math.round(focal)}mm (eq. ${Math.round(focal35)}mm)`
-      : `${Math.round(focal)}mm`
+  // Corrupt rationals (x/0, 0/0) can reach us as Infinity / NaN. Coerce and
+  // finite-check every numeric field so a malformed file can't print
+  // "Infinitymm" / "f/NaN" / "ISO NaN".
+  const okNum = (x: number): boolean => Number.isFinite(x) && x > 0;
+  const focalNum = Number(pick<number>(e, 'FocalLength'));
+  const focal35Num = Number(pick<number>(e, 'FocalLengthIn35mmFormat'));
+  const fnumNum = Number(pick<number>(e, 'FNumber', 'ApertureValue'));
+  const isoNum = Number(pick<number>(e, 'ISO', 'ISOSpeedRatings'));
+  const focalStr = okNum(focalNum)
+    ? okNum(focal35Num) && Math.round(focal35Num) !== Math.round(focalNum)
+      ? `${Math.round(focalNum)}mm (eq. ${Math.round(focal35Num)}mm)`
+      : `${Math.round(focalNum)}mm`
     : '';
   const shot = [
     focalStr,
-    fnum ? `f/${fnum}` : '',
+    okNum(fnumNum) ? `f/${fnumNum}` : '',
     shutter,
-    iso ? `ISO ${iso}` : '',
+    okNum(isoNum) ? `ISO ${isoNum}` : '',
   ].filter(Boolean).join(' · ');
   const taken = pick(e, 'DateTimeOriginal', 'CreateDate', 'DateTime');
 
@@ -478,7 +509,7 @@ function renderExpanded() {
   const colorMode = describeColorMode(e, state.hasAlpha);
   const header = `
     <div class="title" title="${escapeHtml(state.filename)}">${escapeHtml(state.filename)}</div>
-    <div class="meta dim">${getExt(state.filename)} · ${fmtSize(state.fileSize)} · ${state.natural.w}×${state.natural.h}${colorMode ? ' · ' + escapeHtml(colorMode) : ''}</div>
+    <div class="meta dim">${escapeHtml(getExt(state.filename))} · ${fmtSize(state.fileSize)} · ${state.natural.w}×${state.natural.h}${colorMode ? ' · ' + escapeHtml(colorMode) : ''}</div>
   `;
 
   const html = header + (renderedSections.length
@@ -491,17 +522,30 @@ function renderExpanded() {
   setOverlay(target, html);
 }
 
-// Single downscaled sample that feeds both the per-corner glass tint and
-// alpha detection. Merged so a possibly-huge image is rasterized ONCE (one
-// drawImage) instead of once per concern. Two distinct responsibilities:
-//   - alpha: always runs (except the jpg/jpeg/bmp short-circuit) — it feeds
-//     the RGB/RGBA line in the file card regardless of the auto-contrast
-//     setting, so the draw + alpha scan are unconditional.
+// Parse a CSS `rgb(r,g,b)` / `rgba(r,g,b,a)` string — the form
+// getComputedStyle returns for background-color — into 0–255 channels.
+// Returns null when it isn't that form, or when the color is fully
+// transparent (alpha 0); callers then fall back to sampling image pixels.
+function parseCssRgb(s: string): { r: number; g: number; b: number } | null {
+  const m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(s);
+  if (!m) return null;
+  if (m[4] !== undefined && parseFloat(m[4]) === 0) return null;   // transparent
+  return { r: +m[1], g: +m[2], b: +m[3] };
+}
+
+// Feeds the per-corner glass tint and alpha detection off the already-decoded
+// element (no full re-rasterization of a huge image). Two responsibilities,
+// each with its own cheap draw of the same source element:
+//   - alpha: img path only (canvas path trusts the decode worker's full-res
+//     hasAlpha; jpg/jpeg/bmp short-circuit to false). Draw #1 squashes the
+//     image into a 200×200 square and scans its alpha.
 //   - luminance: only when ctx.autoContrast — picks on-dark/on-light glass per
-//     corner. When off, both classes are stripped so the base glass applies.
-// Note: at a 200×200 downscale, translucency confined to sub-sample-scale
-// (~1px in a large source) can be averaged away and missed — an accepted
-// trade-off for not rasterizing the full image twice.
+//     corner. Draw #2 builds a miniature of the STAGE the overlays float over
+//     (theme letterbox + the image in its display rect), so a corner that sits
+//     over the letterbox samples the backdrop it actually covers, not the
+//     image edge. When off, both classes are stripped so base glass applies.
+// Both corner tint and alpha reflect the settle-time layout; a later pan/zoom
+// does not resample (pre-existing behavior).
 async function analyzeImageSample(): Promise<void> {
   const size = 200;
   // Canvas path (TIFF/HEIC): state.hasAlpha was already set from the worker's
@@ -526,16 +570,54 @@ async function analyzeImageSample(): Promise<void> {
   }
 
   try {
-    const sample = document.createElement('canvas');
-    sample.width = size;
-    sample.height = size;
-    const cctx = sample.getContext('2d');
-    if (!cctx) return;
-    cctx.drawImage(activeEl(), 0, 0, size, size);
+    // Draw #1 — alpha (img path, alpha-capable formats only). The image
+    // squashed to fill the sample square, exactly as before.
+    if (!onCanvas && alphaCapable) {
+      const sample = document.createElement('canvas');
+      sample.width = size;
+      sample.height = size;
+      const cctx = sample.getContext('2d');
+      if (cctx) {
+        cctx.drawImage(activeEl(), 0, 0, size, size);
+        const data = cctx.getImageData(0, 0, size, size).data;
+        let alpha = false;
+        for (let i = 3; i < data.length; i += 4) {
+          if (data[i] < 255) { alpha = true; break; }
+        }
+        state.hasAlpha = alpha;
+      }
+    }
 
-    // Per-corner luminance — used to pick on-dark vs on-light glass tint.
-    // No more ranking: slot assignment is fixed (see FIXED_LAYOUT comment).
+    // Draw #2 — per-corner luminance from a miniature of the STAGE, so glass
+    // over the theme letterbox samples the letterbox (a small dark-cornered
+    // image on a light theme otherwise picked on-dark → invisible glass).
     if (ctx.autoContrast) {
+      const stageCanvas = document.createElement('canvas');
+      stageCanvas.width = size;
+      stageCanvas.height = size;
+      const sctx = stageCanvas.getContext('2d');
+      if (!sctx) return;
+      const bg = parseCssRgb(getComputedStyle(document.body).backgroundColor);
+      const nW = state.natural.w, nH = state.natural.h;
+      const stageW = stage.clientWidth, stageH = stage.clientHeight;
+      // Same contain-never-upscale fit applyTransform uses (zoom=1), via the
+      // shared helper — null exactly when nW/nH aren't known yet.
+      const fit = computeDisplaySize(nW, nH, stageW, stageH, 1);
+      if (bg && fit && stageW && stageH) {
+        // Paint the letterbox, then the image in its zoom=1/pan=0 display rect,
+        // scaled into and centered within the size×size miniature like the
+        // stage centers it.
+        sctx.fillStyle = `rgb(${bg.r},${bg.g},${bg.b})`;
+        sctx.fillRect(0, 0, size, size);
+        const mw = fit.w * (size / stageW);
+        const mh = fit.h * (size / stageH);
+        sctx.drawImage(activeEl(), (size - mw) / 2, (size - mh) / 2, mw, mh);
+      } else {
+        // No parseable background / dims yet — fall back to the old behavior
+        // of sampling the image squashed edge-to-edge.
+        sctx.drawImage(activeEl(), 0, 0, size, size);
+      }
+
       const rs = 56;
       const regions: Array<{ key: CornerKey; x: number; y: number }> = [
         { key: 'tl', x: 0, y: 0 },
@@ -544,7 +626,7 @@ async function analyzeImageSample(): Promise<void> {
         { key: 'br', x: size - rs, y: size - rs },
       ];
       for (const r of regions) {
-        const data = cctx.getImageData(r.x, r.y, rs, rs).data;
+        const data = sctx.getImageData(r.x, r.y, rs, rs).data;
         let sum = 0;
         let n = 0;
         for (let i = 0; i < data.length; i += 4) {
@@ -556,17 +638,6 @@ async function analyzeImageSample(): Promise<void> {
         overlays[r.key].classList.toggle('on-dark', mean < 128);
         overlays[r.key].classList.toggle('on-light', mean >= 128);
       }
-    }
-
-    // Alpha — scan the whole downscaled canvas so a fully-opaque image yields
-    // false. img path only; the canvas path kept the worker's value above.
-    if (!onCanvas && alphaCapable) {
-      const data = cctx.getImageData(0, 0, size, size).data;
-      let alpha = false;
-      for (let i = 3; i < data.length; i += 4) {
-        if (data[i] < 255) { alpha = true; break; }
-      }
-      state.hasAlpha = alpha;
     }
   } catch (err) {
     console.warn('[image-overlay] image sample failed', err);
@@ -677,23 +748,19 @@ function applyTransform() {
   other.style.display = 'none';
   el.style.display = '';
 
-  if (state.natural.w && state.natural.h) {
-    const stageW = stage.clientWidth;
-    const stageH = stage.clientHeight;
-    // Default fit: contain in stage, never blow up past natural size at
-    // zoom=1 (matches the previous max-width/max-height: 100% behavior).
-    const fitScale = Math.min(
-      stageW / state.natural.w,
-      stageH / state.natural.h,
-      1,
-    );
-    const display = fitScale * state.zoom;
+  // Default fit: contain in stage, never blow up past natural size at
+  // zoom=1 (matches the previous max-width/max-height: 100% behavior).
+  // null (natural dims not known yet) falls back to letting CSS
+  // max-width/max-height handle sizing.
+  const size = computeDisplaySize(
+    state.natural.w, state.natural.h, stage.clientWidth, stage.clientHeight, state.zoom,
+  );
+  if (size) {
     el.style.maxWidth = 'none';
     el.style.maxHeight = 'none';
-    el.style.width = `${state.natural.w * display}px`;
-    el.style.height = `${state.natural.h * display}px`;
+    el.style.width = `${size.w}px`;
+    el.style.height = `${size.h}px`;
   } else {
-    // No natural dims yet — let CSS max-width/max-height handle it.
     el.style.width = '';
     el.style.height = '';
     el.style.maxWidth = '';
@@ -887,13 +954,6 @@ const decodedCache = new Map<string, DecodedEntry>();
 const DECODED_MAX_ENTRIES = 2;
 const DECODED_MAX_PIXELS = 33_000_000;
 
-// fileUpdate cache-busted URIs (…?v=N / …&v=N) are one-shot: never cache or
-// prefetch them, and when a bust arrives evict the plain-URI entry — a
-// navigate-away-and-back must not repaint the pre-edit pixels.
-function isBustedUri(uri: string): boolean {
-  return /[?&]v=\d+$/.test(uri);
-}
-
 function evictDecoded(uri: string): void {
   const entry = decodedCache.get(uri);
   if (entry) {
@@ -915,24 +975,12 @@ function decodedPixelTotal(): number {
 }
 
 // URIs worth keeping decoded: the current image plus its immediate neighbors
-// (honoring browseLoop). The live currentUri is included too — it may be a
-// `?v=` cache-busted variant that isn't in ctx.siblings.
+// (honoring browseLoop). Thin wrapper over lib/browse.ts's pure core —
+// see there for the wrap/loop math and its test coverage.
 function wantedDecodedUris(): Set<string> {
-  const wanted = new Set<string>();
-  if (state.currentUri) wanted.add(state.currentUri);
-  const n = ctx.siblings.length;
-  const cur = state.currentIndex;
-  const curSib = ctx.siblings[cur];
-  if (curSib) wanted.add(curSib.uri);
-  for (const dir of [-1, 1] as const) {
-    let idx = cur + dir;
-    if (idx < 0) idx = ctx.browseLoop ? n - 1 : -1;
-    else if (idx >= n) idx = ctx.browseLoop ? 0 : -1;
-    if (idx < 0 || idx === cur) continue;
-    const sib = ctx.siblings[idx];
-    if (sib) wanted.add(sib.uri);
-  }
-  return wanted;
+  return computeWantedDecodedUris(
+    state.currentUri, state.currentIndex, ctx.siblings, ctx.browseLoop,
+  );
 }
 
 // Drop decoded entries no longer current-or-neighbor, freeing their GPU-backed
@@ -967,6 +1015,13 @@ function retainDecoded(
   return true;
 }
 
+// The single pending native <img> 'load' listener (null when none is armed or
+// the last one already fired). Tracked so a broken image — which never fires
+// 'load' to auto-remove its { once } listener — can't leak listeners across
+// navigations; loadImageInto removes it before wiring the next, and the 'error'
+// handler removes + clears it when a load will never come.
+let pendingImgLoadHandler: (() => void) | null = null;
+
 // Unified image loader. Native formats go straight to <img>.src; TIFF/HEIC go
 // through their decode worker onto <canvas>. Either way the settle sequence
 // (settleImage) runs once the pixels are actually up, so nav, fileUpdate and
@@ -997,11 +1052,17 @@ function loadImageInto(uri: string, name: string): void {
     return;
   }
 
-  // Native format: <img> path.
+  // Native format: <img> path. A broken image fires 'error', not 'load', so
+  // its { once } load listener never self-removes — browsing past several bad
+  // files would otherwise pile up dead listeners. Keep a single pending
+  // reference and remove any prior one before wiring the next.
+  if (pendingImgLoadHandler) img.removeEventListener('load', pendingImgLoadHandler);
   const onLoad = () => {
+    pendingImgLoadHandler = null;
     if (myGen !== state.loadGen) return;
     void settleImage(myGen, state.currentUri, state.filename);
   };
+  pendingImgLoadHandler = onLoad;
   img.addEventListener('load', onLoad, { once: true });
   state.presenting = 'img';
   img.src = uri;
@@ -1047,6 +1108,11 @@ async function decodeAndPresent(client: DecodeWorkerClient, uri: string, label: 
   }
 }
 
+// Beyond ~16k px on an axis Chromium silently clamps or fails a canvas backing
+// store, which would crop the preview. Cap the canvas at this and downscale the
+// draw instead — state.natural still carries the true decoded dims below.
+const MAX_CANVAS_AXIS = 16384;
+
 // Draw a decoded bitmap onto the canvas and run the shared settle pass. Uses
 // drawImage (NOT transferFromImageBitmap, which would consume the bitmap and
 // break cache reuse). When `retained` is false the bitmap is a throwaway the
@@ -1056,15 +1122,24 @@ function presentDecoded(
   myGen: number, retained: boolean,
 ): void {
   if (myGen !== state.loadGen) { if (!retained) bitmap.close(); return; }
-  canvas.width = w;
-  canvas.height = h;
+  // Over-cap images: fit the backing store under MAX_CANVAS_AXIS and let
+  // drawImage scale the bitmap into it (soft-downscaled preview beats a
+  // cropped one). state.natural keeps the true dims, so the file card and
+  // histogram still report full resolution.
+  const drawScale = w > MAX_CANVAS_AXIS || h > MAX_CANVAS_AXIS
+    ? Math.min(MAX_CANVAS_AXIS / w, MAX_CANVAS_AXIS / h)
+    : 1;
+  const cw = Math.max(1, Math.round(w * drawScale));
+  const ch = Math.max(1, Math.round(h * drawScale));
+  canvas.width = cw;
+  canvas.height = ch;
   const cctx = canvas.getContext('2d');
   if (!cctx) {
     if (!retained) bitmap.close();
     showDecodeError('decode', new Error('no canvas 2d ctx'));
     return;
   }
-  cctx.drawImage(bitmap, 0, 0);
+  cctx.drawImage(bitmap, 0, 0, cw, ch);
   if (!retained) bitmap.close();
   // Worker's full-res hasAlpha is authoritative; natural dims come from the
   // decode, not from any <img>. presenting flips to canvas so activeEl(), the
@@ -1079,12 +1154,14 @@ function presentDecoded(
 function showDecodeError(label: string, err: unknown): void {
   const detail = err instanceof Error ? err.message : String(err);
   // Surface the underlying message in the TL card — without it a bug report
-  // has no signal beyond "didn't work".
-  overlays.tl.innerHTML = `
+  // has no signal beyond "didn't work". Route through setOverlay (not a direct
+  // innerHTML write) so overlayHtmlCache['tl'] stays coherent — otherwise a
+  // later render() with an identical string would skip its write and leave
+  // this error card stuck.
+  setOverlay('tl', `
     <div class="title">${escapeHtml(state.filename)}</div>
     <div class="meta dim">${label} decode failed</div>
-    <div class="meta dim" style="font-size:10px;opacity:0.7;word-break:break-word;">${escapeHtml(detail)}</div>`;
-  overlays.tl.classList.remove('empty');
+    <div class="meta dim" style="font-size:10px;opacity:0.7;word-break:break-word;">${escapeHtml(detail)}</div>`);
   // No settle runs on a failed decode, so pace the slideshow from here or a
   // broken file would stall the show forever on the image that never decoded.
   if (state.slideshowOn) scheduleSlideshowTick();
@@ -1147,6 +1224,10 @@ async function settleImage(myGen: number, uri: string, name: string): Promise<vo
 const histPanel = document.getElementById('histogram') as HTMLDivElement;
 const histCanvas = histPanel.querySelector('canvas') as HTMLCanvasElement;
 const histStatus = histPanel.querySelector('.hist-status') as HTMLDivElement;
+// A11y: the histogram is a graphic, not a decorative canvas — give it an
+// image role and a text alternative so a screen reader announces its purpose.
+histCanvas.setAttribute('role', 'img');
+histCanvas.setAttribute('aria-label', 'RGB histogram');
 
 function setHistCanvasSize(): void {
   // 320×120 logical, scaled for hi-DPI so the curves are crisp on retina.
@@ -1450,10 +1531,16 @@ img.addEventListener('error', () => {
   // native src can still land here. Those formats report real failures via
   // showDecodeError, never this handler.
   if (isTiffName(state.filename) || isHeicName(state.filename)) return;
-  overlays.tl.innerHTML = `
+  // The { once } load listener for this src will never fire now — remove it so
+  // it doesn't sit attached, and clear the reference.
+  if (pendingImgLoadHandler) {
+    img.removeEventListener('load', pendingImgLoadHandler);
+    pendingImgLoadHandler = null;
+  }
+  // Route through setOverlay so overlayHtmlCache['tl'] stays coherent.
+  setOverlay('tl', `
     <div class="title">${escapeHtml(state.filename)}</div>
-    <div class="meta dim">failed to load preview</div>`;
-  overlays.tl.classList.remove('empty');
+    <div class="meta dim">failed to load preview</div>`);
   // A broken native-format image never reaches the settle pass, so keep the
   // slideshow moving from here.
   if (state.slideshowOn) scheduleSlideshowTick();
@@ -1556,6 +1643,11 @@ stage.addEventListener('dblclick', () => {
 });
 
 window.addEventListener('keydown', (e) => {
+  // Don't hijack VS Code's chords: bail on any Ctrl / Cmd / Alt combo so
+  // Ctrl+0, Alt+←, Cmd+E, Ctrl+= (DevTools/zoom), etc. still reach the host
+  // while the webview has focus. Shift is deliberately NOT included — '+'
+  // arrives as a shift-produced e.key and must keep working.
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'i' || e.key === 'I') {
     state.visible = !state.visible;
     render();
@@ -1578,9 +1670,11 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     navigate(+1, /*manual*/ true);
   } else if (e.key === ' ') {
-    // Space: toggle slideshow. Only meaningful when there's >1 image.
+    // Space: preventDefault unconditionally so it never scrolls the page or
+    // activates a focused GPS map link — even for a single image or before the
+    // sibling list arrives. Toggling the slideshow still needs >1 image.
+    e.preventDefault();
     if (ctx.siblings.length > 1) {
-      e.preventDefault();
       toggleSlideshow();
     }
   } else if (e.key === '[') {
@@ -1609,6 +1703,10 @@ function schedulePrefetch(): void {
   if (ctx.siblings.length <= 1) return;
   const n = ctx.siblings.length;
   const cur = state.currentIndex;
+  // Anchor unknown (currentIndex -1): the opened file isn't in the sibling
+  // list, so there are no meaningful neighbors to warm — skip until a
+  // navigation seeds a real index.
+  if (cur < 0) return;
   const wantedNative: string[] = [];
   // Decoder neighbors carry their direction so we can attempt +1 before -1 —
   // forward browsing / slideshow then wins the (budget-limited) decode slot.
@@ -1714,6 +1812,13 @@ let slideshowTimer: number | null = null;
 
 function navigate(direction: -1 | 1, manual: boolean): void {
   if (ctx.siblings.length <= 1) return;
+  // Anchor unknown (currentIndex -1: opened file not in the sibling list).
+  // There's no "current" to step from, so seed the cursor at an end — forward
+  // → first image, backward → last — then normal stepping resumes from there.
+  if (state.currentIndex < 0) {
+    swapTo(direction > 0 ? 0 : ctx.siblings.length - 1);
+    return;
+  }
   let idx = state.currentIndex + direction;
   if (idx < 0) idx = ctx.browseLoop ? ctx.siblings.length - 1 : 0;
   else if (idx >= ctx.siblings.length) idx = ctx.browseLoop ? 0 : ctx.siblings.length - 1;
@@ -1870,7 +1975,15 @@ window.addEventListener('mousemove', (e) => {
   lastCursor.y = e.clientY;
   scheduleProximityUpdate();
 });
-window.addEventListener('keydown', markActive);
+window.addEventListener('keydown', () => {
+  markActive();
+  // Keyboard-only users have no cursor to move off a corner, so a cursor-near
+  // fade could stick with no way to clear it. Any keypress un-fades every
+  // corner; the mouse path re-derives proximity on the next mousemove.
+  for (const key of Object.keys(overlays) as CornerKey[]) {
+    overlays[key].classList.remove('cursor-near');
+  }
+});
 window.addEventListener('wheel', markActive, { passive: true });
 window.addEventListener('mousedown', markActive);
 window.addEventListener('focus', markActive);

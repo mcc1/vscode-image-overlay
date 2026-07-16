@@ -84,42 +84,85 @@ function getDecoder(): LibheifDecoder {
   return decoder;
 }
 
+// The id of the request currently being processed, or null between requests.
+// libheif's display() runs the real pixel decode from an INTERNAL setTimeout,
+// so a throw there lands after onmessage has returned — outside its try/catch —
+// and would otherwise crash the whole persistent worker. The global 'error'
+// handler below turns such a throw into an {ok:false} for this id instead.
+// Single-threaded, strictly-sequential request processing keeps it unambiguous.
+let currentId: number | null = null;
+
+self.addEventListener('error', (ev: ErrorEvent) => {
+  // Swallow the uncaught error so it doesn't propagate to the main thread's
+  // Worker.onerror (which tears this persistent worker down) and fail only the
+  // in-flight request — the worker stays alive to serve the next id.
+  ev.preventDefault();
+  const id = currentId;
+  currentId = null;
+  if (id != null) respondError(id, ev.message || 'libheif: deferred decode crashed');
+});
+
 self.onmessage = (e: MessageEvent<DecodeRequest>) => {
   const { id, buffer } = e.data;
+  currentId = id;
+  // Held so a SYNC throw before display()'s callback takes ownership (a corrupt
+  // file can throw in get_width / display() itself) frees the primary handle
+  // instead of leaking it. Once display() is scheduled without throwing, its
+  // callback owns freeing and nulls this so the finally below won't re-free.
+  let image: LibheifImage | null = null;
+  let scheduled = false;
   try {
     const images = getDecoder().decode(buffer);
     if (!images || images.length === 0) {
       throw new Error('libheif: no images in file');
     }
-    const image = images[0];
+    const primary = images[0];
+    image = primary;
     // We only ever render images[0] (same selection as before). Release
     // every other top-level image's handle immediately instead of letting
     // it sit unreferenced-but-unfreed in the WASM heap.
     for (let i = 1; i < images.length; i++) images[i].free();
 
-    const w = image.get_width();
-    const h = image.get_height();
+    const w = primary.get_width();
+    const h = primary.get_height();
     const rgba = new Uint8ClampedArray(w * h * 4);
-    image.display({ data: rgba, width: w, height: h }, (display) => {
-      if (!display) {
-        image.free();
-        respondError(id, 'libheif: display() decode failed');
-        return;
+    primary.display({ data: rgba, width: w, height: h }, (display) => {
+      try {
+        if (!display) {
+          respondError(id, 'libheif: display() decode failed');
+          return;
+        }
+        // Detect translucency once during decode — saves a separate pass on
+        // the main thread later. HEIC is often opaque (camera output) so
+        // this is usually trivially false.
+        let hasAlpha = false;
+        for (let i = 3; i < display.data.length; i += 4) {
+          if (display.data[i] < 255) { hasAlpha = true; break; }
+        }
+        const response: DecodeResponse = { id, ok: true, rgba: display.data, width: w, height: h, hasAlpha };
+        (self as unknown as Worker).postMessage(response, [display.data.buffer]);
+      } finally {
+        // Free the primary handle on every callback branch, and null the outer
+        // ref so the onmessage finally can't double-free it under any ordering.
+        primary.free();
+        image = null;
+        if (currentId === id) currentId = null;
       }
-      // Detect translucency once during decode — saves a separate pass on
-      // the main thread later. HEIC is often opaque (camera output) so
-      // this is usually trivially false.
-      let hasAlpha = false;
-      for (let i = 3; i < display.data.length; i += 4) {
-        if (display.data[i] < 255) { hasAlpha = true; break; }
-      }
-      image.free();
-      const response: DecodeResponse = { id, ok: true, rgba: display.data, width: w, height: h, hasAlpha };
-      (self as unknown as Worker).postMessage(response, [display.data.buffer]);
     });
+    // display() returned without throwing — its callback now owns freeing the
+    // handle and clearing currentId.
+    scheduled = true;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     respondError(id, message);
+  } finally {
+    // Sync-throw path only: display()'s callback will never run, so free the
+    // primary handle here and release currentId. When scheduled, both are the
+    // callback's (or, on a deferred crash, the global 'error' guard's) job.
+    if (!scheduled) {
+      if (image) image.free();
+      if (currentId === id) currentId = null;
+    }
   }
 };
 

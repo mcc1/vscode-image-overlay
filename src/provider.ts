@@ -23,8 +23,8 @@ const DEFERRED_DECODE_EXTS: ReadonlySet<string> = new Set([
 ]);
 
 interface SiblingItem {
-  fsPath: string;
-  uri: string;       // webview-uri string, ready to drop into <img src>
+  canonicalUri: string;  // document-scheme Uri.toString(), for the opened-file match
+  uri: string;           // webview-uri string, ready to drop into <img src>
   name: string;
   size: number;
   mtime: number;
@@ -61,16 +61,17 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     document: ImageDocument,
     webviewPanel: vscode.WebviewPanel
   ): Promise<void> {
-    const imageDir = vscode.Uri.file(path.dirname(document.uri.fsPath));
+    // Scheme-preserving parent dir. Uri.file(path.dirname(uri.fsPath)) would
+    // drop scheme + authority (and flip separators on Windows), so on
+    // vscode-remote / WSL / container / virtual filesystems the image itself
+    // falls outside localResourceRoots and never loads. joinPath(uri, '..')
+    // keeps scheme + authority intact.
+    const imageDir = vscode.Uri.joinPath(document.uri, '..');
 
-    webviewPanel.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        imageDir,
-        vscode.Uri.joinPath(this.context.extensionUri, 'dist'),
-        vscode.Uri.joinPath(this.context.extensionUri, 'media'),
-      ],
-    };
+    // Declared before the first await (the stat below) so a panel closed
+    // mid-resolve can't be written to (options/html) after disposal.
+    let panelDisposed = false;
+    webviewPanel.onDidDispose(() => { panelDisposed = true; });
 
     const config = vscode.workspace.getConfiguration('imageOverlay');
     const defaultVisible = config.get<boolean>('defaultVisible', true);
@@ -80,33 +81,70 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     const sortBy = (config.get<string>('browseSortBy', 'filename') as SortBy);
     const sortOrder = (config.get<string>('browseSortOrder', 'asc') as SortOrder);
     const browseLoop = config.get<boolean>('browseLoop', false);
-    const slideshowIntervalMs = Math.max(500,
-      config.get<number>('slideshowIntervalMs', 3000));
+    const slideshowIntervalMs = Math.min(30000, Math.max(500,
+      config.get<number>('slideshowIntervalMs', 3000)));
 
-    const stat = await vscode.workspace.fs.stat(document.uri);
+    let stat: vscode.FileStat;
+    try {
+      stat = await vscode.workspace.fs.stat(document.uri);
+    } catch {
+      // File unreadable (permissions, deleted mid-open, provider error).
+      // Show a static message instead of leaving an unhandled rejection.
+      if (!panelDisposed) {
+        try {
+          const cspSource = webviewPanel.webview.cspSource;
+          webviewPanel.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
+<title>Image Overlay Preview</title>
+</head>
+<body><p>The image file could not be read.</p></body>
+</html>`;
+        } catch { /* panel disposed between the check above and now */ }
+      }
+      return;
+    }
 
-    // Paint immediately: assign the webview HTML now, before sibling
+    // Panel may have been disposed during the stat await — don't write to it.
+    if (panelDisposed) return;
+
+    // Paint immediately: assign options + HTML now, before sibling
     // enumeration even starts. Folders with thousands of images used to
     // block first paint on a sequential per-file stat loop; siblings now
-    // arrive afterwards over postMessage (see below).
-    webviewPanel.webview.html = this.buildHtml(
-      webviewPanel.webview,
-      document.uri,
-      {
-        filename: path.basename(document.uri.fsPath),
-        fileSize: stat.size,
-        mtime: stat.mtime,
-        defaultVisible,
-        autoContrast,
-        showHint,
-        gpsMapProvider,
-        siblings: [],
-        currentIndex: 0,
-        browseLoop,
-        slideshowIntervalMs,
-        histogramOn: this.histogramOn,
-      }
-    );
+    // arrive afterwards over postMessage (see below). The try/catch is a
+    // backstop for the (check → write) disposal race.
+    try {
+      webviewPanel.webview.options = {
+        enableScripts: true,
+        localResourceRoots: [
+          imageDir,
+          vscode.Uri.joinPath(this.context.extensionUri, 'dist'),
+          vscode.Uri.joinPath(this.context.extensionUri, 'media'),
+        ],
+      };
+      webviewPanel.webview.html = this.buildHtml(
+        webviewPanel.webview,
+        document.uri,
+        {
+          filename: basenameOf(document.uri),
+          fileSize: stat.size,
+          mtime: stat.mtime,
+          defaultVisible,
+          autoContrast,
+          showHint,
+          gpsMapProvider,
+          siblings: [],
+          currentIndex: 0,
+          browseLoop,
+          slideshowIntervalMs,
+          histogramOn: this.histogramOn,
+        }
+      );
+    } catch {
+      return; /* panel disposed between the check above and the write */
+    }
 
     // Enumerate sibling images in the background — sort once on host so the
     // webview can navigate purely by index. ~1000 entries × ~200 bytes each
@@ -115,7 +153,6 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     // slideshow. Delivered exactly once, after both enumeration and the
     // webview's 'ready' handshake have completed — whichever lands last
     // triggers the post.
-    let panelDisposed = false;
     let webviewReady = false;
     let siblingsSent = false;
     let siblings: SiblingItem[] | undefined;
@@ -125,9 +162,12 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       const result = siblings;
       if (result === undefined) return;
       siblingsSent = true;
-      const currentIndex = Math.max(
-        0,
-        result.findIndex((s) => s.fsPath === document.uri.fsPath),
+      // -1 (not Math.max(0, …)) when the opened file isn't in the enumerated
+      // list — the webview treats -1 as "not in list" rather than anchoring
+      // navigation to the wrong (index 0) sibling. Compare canonical Uri
+      // strings so scheme/authority/encoding are handled consistently.
+      const currentIndex = result.findIndex(
+        (s) => s.canonicalUri === document.uri.toString(),
       );
       try {
         webviewPanel.webview.postMessage({
@@ -174,13 +214,15 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     const setActive = (panel: vscode.WebviewPanel | undefined) => {
       this.activePanel = panel;
     };
-    setActive(webviewPanel);
+    // Only claim active if this panel actually has focus at resolve time;
+    // onDidChangeViewState maintains it afterwards. A background-resolved
+    // panel (e.g. restored on reload) must not steal activePanel.
+    if (webviewPanel.active) setActive(webviewPanel);
 
     webviewPanel.onDidChangeViewState((e) => {
       setActive(e.webviewPanel.active ? e.webviewPanel : this.activePanel === e.webviewPanel ? undefined : this.activePanel);
     });
     webviewPanel.onDidDispose(() => {
-      panelDisposed = true;
       if (this.activePanel === webviewPanel) setActive(undefined);
     });
 
@@ -218,8 +260,9 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     sortBy: SortBy,
     sortOrder: SortOrder,
   ): Promise<SiblingItem[]> {
-    const dir = path.dirname(currentUri.fsPath);
-    const dirUri = vscode.Uri.file(dir);
+    // Scheme-preserving parent dir (see resolveCustomEditor) — Uri.file(dir)
+    // would break enumeration on remote/virtual filesystems.
+    const dirUri = vscode.Uri.joinPath(currentUri, '..');
     let entries: [string, vscode.FileType][];
     try {
       entries = await vscode.workspace.fs.readDirectory(dirUri);
@@ -228,27 +271,36 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     }
     const candidates = entries.filter(([name, type]) => {
       if (type !== vscode.FileType.File) return false;
-      return SUPPORTED_EXTS.has(path.extname(name).toLowerCase());
+      return SUPPORTED_EXTS.has(extOf(name));
     });
-    // Stat calls fire in parallel — a sequential await-per-file loop here
-    // was the first-paint bottleneck in folders with thousands of images.
-    const stated = await Promise.all(candidates.map(async ([name]): Promise<SiblingItem | undefined> => {
-      const fullPath = path.join(dir, name);
-      try {
-        const s = await vscode.workspace.fs.stat(vscode.Uri.file(fullPath));
-        return {
-          fsPath: fullPath,
-          uri: webview.asWebviewUri(vscode.Uri.file(fullPath)).toString(),
-          name,
-          size: s.size,
-          mtime: s.mtime,
-          ctime: s.ctime,
-        };
-      } catch {
-        return undefined; /* skip unreadable */
-      }
-    }));
-    const items = stated.filter((item): item is SiblingItem => item !== undefined);
+    // Stat calls fire in parallel, but in bounded batches — a flat Promise.all
+    // over tens of thousands of files can stampede the FS provider (especially
+    // remote/virtual) and drop entries nondeterministically. Keeping ≤64 in
+    // flight preserves fast first paint without the stampede; per-file
+    // failures still skip silently.
+    const BATCH = 64;
+    const items: SiblingItem[] = [];
+    for (let i = 0; i < candidates.length; i += BATCH) {
+      const stated = await Promise.all(
+        candidates.slice(i, i + BATCH).map(async ([name]): Promise<SiblingItem | undefined> => {
+          const fileUri = vscode.Uri.joinPath(dirUri, name);
+          try {
+            const s = await vscode.workspace.fs.stat(fileUri);
+            return {
+              canonicalUri: fileUri.toString(),
+              uri: webview.asWebviewUri(fileUri).toString(),
+              name,
+              size: s.size,
+              mtime: s.mtime,
+              ctime: s.ctime,
+            };
+          } catch {
+            return undefined; /* skip unreadable */
+          }
+        }),
+      );
+      for (const item of stated) if (item !== undefined) items.push(item);
+    }
     const cmp = (a: SiblingItem, b: SiblingItem): number => {
       let r = 0;
       if (sortBy === 'mtime') r = a.mtime - b.mtime;
@@ -306,7 +358,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
     // Provider already knows the opened file's extension, so it can skip
     // emitting <img src> for those formats instead of letting main.ts
     // start-then-abort a native decode of bytes it can't use.
-    const ext = path.extname(imageUri.fsPath).toLowerCase();
+    const ext = extOf(basenameOf(imageUri));
     const imgTag = DEFERRED_DECODE_EXTS.has(ext)
       ? `<img id="img" alt="" draggable="false">`
       : `<img id="img" src="${imageWebUri}" alt="" draggable="false">`;
@@ -321,7 +373,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
       showHint: ctx.showHint,
       gpsMapProvider: ctx.gpsMapProvider,
       siblings: ctx.siblings.map((s) => ({
-        // fsPath is internal — webview only needs uri/name/size/mtime/ctime
+        // canonicalUri is internal — webview only needs uri/name/size/mtime/ctime
         uri: s.uri,
         name: s.name,
         size: s.size,
@@ -340,7 +392,7 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob: https://tile.openstreetmap.org https://a.tile.openstreetmap.org https://b.tile.openstreetmap.org https://c.tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob: 'wasm-unsafe-eval'; worker-src ${cspSource} blob:; font-src ${cspSource}; connect-src ${cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https://tile.openstreetmap.org; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob: 'wasm-unsafe-eval'; worker-src blob:; connect-src ${cspSource};">
 <link href="${styleUri}" rel="stylesheet">
 <title>${escapeHtml(ctx.filename)}</title>
 </head>
@@ -359,6 +411,23 @@ export class ImageOverlayEditorProvider implements vscode.CustomReadonlyEditorPr
 </body>
 </html>`;
   }
+}
+
+// Last path segment of a Uri, taken from its posix `path` (NOT fsPath, which
+// drops scheme/authority and flips separators on Windows). For a plain local
+// file this equals path.basename(uri.fsPath); on remote/virtual URIs it stays
+// correct where fsPath would not.
+function basenameOf(uri: vscode.Uri): string {
+  const p = uri.path;
+  const i = p.lastIndexOf('/');
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+
+// Lowercased extension (including the dot) of a filename, matching
+// path.extname's leading-dot rule — a dotfile like ".gitignore" has none.
+function extOf(name: string): string {
+  const i = name.lastIndexOf('.');
+  return i > 0 ? name.slice(i).toLowerCase() : '';
 }
 
 // Path equality for the live-refresh watcher filter: normalizes separators

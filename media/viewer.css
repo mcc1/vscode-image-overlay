@@ -164,6 +164,13 @@ body.expanded .corner.tl {
   pointer-events: auto;
 }
 
+/* The expanded EXIF panel is 56vw wide, so let its filename title use that
+   width instead of the collapsed card's 38vw cap (which truncated long names
+   well short of the panel edge). */
+body.expanded .corner.tl .title {
+  max-width: 54vw;
+}
+
 /* Expanded mode hides the file (BL) and GPS (TR) corners so the EXIF table
    owns the space. Hidden, not emptied — display:none keeps their innerHTML
    (and the TR map card's tile <img>s) intact across expand→collapse→expand,

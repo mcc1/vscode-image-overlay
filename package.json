@@ -36,6 +36,16 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "Read-only image viewer; no code execution or workspace writes."
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Basic viewing works on virtual file systems; live refresh may be unavailable."
+    }
+  },
   "contributes": {
     "customEditors": [
       {
@@ -155,7 +165,8 @@
           "type": "number",
           "default": 3000,
           "minimum": 500,
-          "description": "Default slideshow interval in milliseconds. [ and ] adjust on the fly."
+          "maximum": 30000,
+          "description": "Default slideshow interval in milliseconds (0.5–30 s; clamped to that range). [ and ] adjust on the fly."
         }
       }
     },
@@ -172,8 +183,8 @@
     "keybindings": [
       {
         "command": "imageOverlay.toggleOverlay",
-        "key": "ctrl+shift+i",
-        "mac": "cmd+shift+i",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i",
         "when": "activeCustomEditorId == imageOverlay.preview"
       }
     ]
@@ -191,7 +202,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/utif": "^3.0.6",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "1.85.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.21.5",
     "typescript": "^5.4.5",

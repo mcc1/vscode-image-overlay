@@ -260,6 +260,10 @@ describe('describeCaptureExtras', () => {
   it('signs negative exposure compensation', () => {
     expect(describeCaptureExtras({ ExposureBiasValue: -1.3 })).toEqual(['-1.3 EV']);
   });
+  it('guards against a NaN exposure bias (corrupt rational) while keeping real values', () => {
+    expect(describeCaptureExtras({ ExposureBiasValue: NaN })).toEqual([]);
+    expect(describeCaptureExtras({ ExposureBiasValue: -0.7 })).toEqual(['-0.7 EV']);
+  });
 });
 
 // ---------- Map URL + slippy tile math ----------

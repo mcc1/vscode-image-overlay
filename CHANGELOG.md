@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.6 — Remote workspaces, keyboard & light-theme fixes
+
+Fix batch from the post-0.3.5 full review — nothing new to learn, just
+things that should always have worked.
+
+- **Remote and virtual workspaces actually work now.** Workspace-file
+  URIs were being rebuilt through local-disk paths, which silently broke
+  image loading on Remote-SSH / WSL / dev containers and virtual file
+  systems (GitHub Repositories etc.). All URI handling is now
+  scheme-preserving, and the extension declares its capabilities
+  honestly: enabled in Restricted Mode (it's a read-only viewer),
+  "limited" on virtual file systems.
+- **Keyboard chords aren't hijacked anymore.** The viewer used to
+  swallow Ctrl+0 / Alt+← / Cmd+E while focused; modifier combos now pass
+  through to VS Code. The toggle-overlay keybinding moved from
+  Ctrl+Shift+I (which collided with Toggle Developer Tools) to
+  **Ctrl+Alt+I** (Cmd+Alt+I on macOS).
+- **Light-theme readability.** Corner cards picked their glass tint from
+  the image's own corner pixels even when the card actually floats over
+  the editor's letterbox background — a dark photo on a light theme made
+  cards nearly invisible. The sampler now composites a miniature of the
+  real stage (theme background + image at its fitted rect) and samples
+  that instead.
+- **Deleted/foreign files browse correctly.** When the opened file isn't
+  in the folder listing (deleted mid-open, filtered extension), the
+  viewer no longer pretends it's the first file — the position counter
+  hides and ←/→ anchor sensibly from the start/end.
+- Giant panoramas beyond the ~16k canvas axis limit downscale gracefully
+  instead of silently cropping; Space no longer scrolls or activates a
+  focused map link; polar-region GPS falls back to coordinates instead
+  of an empty map; the slideshow interval is clamped to the documented
+  0.5–30 s; corner cards and the histogram get screen-reader labels, and
+  a stuck corner fade clears on any keypress.
+- Robustness: sibling stats run in bounded batches (huge folders),
+  editor resolve is guarded against deleted files and disposed panels, a
+  corrupt HEIC that crashes deep inside libheif no longer takes the
+  decode worker down with it, the CSP dropped several unused allowances,
+  EXIF numbers are NaN-proofed, and extension strings are escaped.
+
+Internals: pure browse/transform logic extracted to `lib/` with tests —
+the suite grows 74 → 94. `@types/vscode` pinned to the 1.85 engine floor.
+
 ## 0.3.5 — TIFF/HEIC: worker decode, no transcode round-trip
 
 The 0.3.3 perf work made PNG/JPG fast; this release does the heavy
